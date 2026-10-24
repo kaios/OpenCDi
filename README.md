@@ -74,7 +74,7 @@ A debug log is written to `~/.opencdi/debug.log` on every run. Emulator faults a
 logged there; `--debug` adds per-event detail. What each message means, and every change
 made in each release, is described in `docs/debug/`.
 
-Disc images: `.cue/.bin` (MODE1/2352, MODE2/2352, MODE2/2336, AUDIO; multi-track and
+Disc images: `.cue/.bin` (MODE1/2048, MODE1/2352, MODE2/2352, MODE2/2336, CDI/2352, CDI/2336, AUDIO; multi-track and
 multi-file), `.iso`/`.bin`/`.img` single files.  Raw 2352-byte sectors are best because they
 keep the CD-i subheaders; 2048-byte "cooked" ISOs get a synthesized data subheader, which is
 enough for the file system but loses audio/video interleaving information.
@@ -104,7 +104,7 @@ Verified: the player shell boots and is fully usable (menus, settings, info), au
 recognised and play, and CD-i discs are recognised and their application loads and runs
 (tested with the LGPL homebrew *CD-i Stub*).  The CPU core passes the SingleStepTests
 68000 suite (`tools/run_sst.py`) apart from address-error cases it skips.
-`tools/check_fixes.py` runs regression checks for the 0.1.1 fixes without a BIOS.
+`tools/check_fixes.py` runs regression checks for the fixes since 0.1.1 without a BIOS.
 
 Speed: everything is pure Python plus numpy.  The CPU core is generated per opcode at
 start-up, and pixels are produced once per frame with numpy.  On a typical desktop the

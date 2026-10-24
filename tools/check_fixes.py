@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Regression checks for the fixes in 0.1.1 (see docs/debug/0.1.1.md).
+"""Regression checks for the fixes in 0.1.1 and later (see docs/debug/).
 
 Usage: tools/check_fixes.py
 
 Runs without a BIOS or disc image.  Prints PASS/FAIL per check and exits
 non-zero if any check fails.
 """
-import sys, os, logging, tempfile
+import atexit, sys, os, logging, shutil, tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 WORK = tempfile.mkdtemp(prefix='opencdi-check-')
+atexit.register(shutil.rmtree, WORK, True)
 from opencdi import debuglog
 logpath = os.path.join(WORK, 'check_debug.log')
 debuglog.setup(debug=True, path=logpath)
@@ -141,6 +142,25 @@ n, s = Disc(f'{d}/n.cue'), Disc(f'{d}/s.cue')
 same = all(n.read_raw(l) == s.read_raw(l) for l in range(24))
 check('byte swapped image reads the same (data + audio)', s.byteswapped and not n.byteswapped and same)
 n.close(); s.close()
+
+# 5b. cue sheets with the CD-i track types CDI/2352 and CDI/2336 load as Mode 2
+raw16 = bytes(sec)                                  # 20 raw sectors from above
+mode2 = b''.join(raw16[i*2352 + 16:(i+1)*2352] for i in range(20))   # same sectors, 2336 bytes each
+open(f'{d}/c52.bin', 'wb').write(raw16); open(f'{d}/c36.bin', 'wb').write(mode2)
+for name, mode in (('c52', 'CDI/2352'), ('c36', 'cdi/2336')):
+    open(f'{d}/{name}.cue', 'w').write(f'FILE "{name}.bin" BINARY\n  TRACK 01 {mode}\n    INDEX 01 00:00:00\n')
+c52, c36 = Disc(f'{d}/c52.cue'), Disc(f'{d}/c36.cue')
+check('CDI/2352 cue loads as mode2', [(t.kind, t.sector_size, t.length) for t in c52.tracks] == [('mode2', 2352, 20)])
+check('CDI/2336 cue loads as mode2', [(t.kind, t.sector_size, t.length) for t in c36.tracks] == [('mode2', 2336, 20)])
+# the 2336-byte reader builds its own (BCD) header, so compare from the mode byte on
+check('CDI/2336 sectors read like the raw ones', all(c52.read_raw(l)[15:] == c36.read_raw(l)[15:] for l in range(20)))
+c52.close(); c36.close()
+try:
+    open(f'{d}/bad.cue', 'w').write('FILE "c52.bin" BINARY\n  TRACK 01 MODE3/2352\n    INDEX 01 00:00:00\n')
+    Disc(f'{d}/bad.cue')
+    check('unknown track mode still rejected', False)
+except ValueError as e:
+    check('unknown track mode still rejected', 'MODE3/2352' in str(e), str(e))
 
 # 6. cursor follows the picture into the border in 720-pixel mode
 from opencdi.mcd212 import MCD212, CURCNT_EN, DCR_CF_BIT

@@ -150,13 +150,14 @@ class Disc:
                 if mode == 'AUDIO':
                     kind, ss = 'audio', RAW
                 else:
-                    m = re.match(r'MODE(\d)/(\d+)', mode)
+                    # MODE1/2048, MODE1/2352, MODE2/2336, MODE2/2352, and the
+                    # CD-i specific CDI/2336 and CDI/2352 (Mode 2 sectors)
+                    m = re.fullmatch(r'(MODE1|MODE2|CDI)/(\d+)', mode)
                     if not m:
-                        raise ValueError(f'unsupported track mode {mode}')
-                    kind = 'mode' + m.group(1)
+                        raise ValueError(f'unsupported track mode {parts[2]}')
+                    kind = 'mode1' if m.group(1) == 'MODE1' else 'mode2'
                     ss = int(m.group(2))
-                    if mode.startswith('CDI'):
-                        kind = 'mode2'
+                    dlog.debug('%s: track %s is %s, %s-byte sectors', cue, parts[1], mode, ss)
                 cur = {'num': int(parts[1]), 'kind': kind, 'ss': ss, 'file': cur_file,
                        'index': {}, 'pregap': 0}
                 entries.append(cur)
