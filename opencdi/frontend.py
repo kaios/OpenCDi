@@ -96,6 +96,10 @@ class App:
             size = (int(BASE_SIZE[0] * self.scale), int(BASE_SIZE[1] * self.scale))
             self.window = pygame.display.set_mode(size, pygame.RESIZABLE)
         pygame.display.set_caption('OpenCDi')
+        try:
+            pygame.display.set_icon(pygame.image.load(str(Path(__file__).with_name('data') / 'opencdi.png')))
+        except (pygame.error, FileNotFoundError):
+            pass
 
     def toggle_fullscreen(self):
         self.fullscreen = not self.fullscreen

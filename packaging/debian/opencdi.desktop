@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OpenCDi
+GenericName=CD-i Emulator
+Comment=Philips CD-i (Mono-I) emulator
+Exec=opencdi %f
+Icon=opencdi
+Terminal=false
+Categories=Game;Emulator;
+Keywords=cdi;philips;emulator;
+MimeType=application/x-cue;application/x-iso9660-image;application/x-cd-image;

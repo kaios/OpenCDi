@@ -16,13 +16,26 @@ It emulates the CD-i **Mono-I** board (Philips CD-i 220 F2 / Magnavox CD-i 200):
 
 * Python 3.9+
 * `pip install -r requirements.txt` (numpy, pygame 2)
-* **A CD-i system ROM (BIOS) is required.** It is not included in this repository. Download it from
-  <https://archive.org/download/philips-cd-i-misc-bios> and place the files in a
-  `philips-cd-i-misc-bios/` directory next to the `opencdi/` package (or pass `--bios PATH`).
+* **A CD-i system ROM (BIOS) is required.** It is not included with the emulator. Download it from
+  <https://archive.org/download/philips-cd-i-misc-bios>, save it anywhere, and select it in the
+  launcher (or pass `--bios PATH`).
   The Mono-I ROMs from that set work:
-  `cdi220b.rom` (Philips CD-i 220 F2, default) or `cdi200.rom` (Magnavox CD-i 200).
+  `cdi220b.rom` (Philips CD-i 220 F2, recommended) or `cdi200.rom` (Magnavox CD-i 200).
   `cdi220.rom` is detected but does not boot (MAME reports the same).
   `cdi490a.rom` is a Mono-IV board ROM, which is different hardware and not supported.
+
+## Installing on Debian / Ubuntu
+
+Build a `.deb` package and install it (this pulls in `python3-numpy` and `python3-pygame`):
+
+```sh
+tools/build_deb.sh                       # writes dist/opencdi_<version>_all.deb
+sudo apt install ./dist/opencdi_*_all.deb
+```
+
+This installs the `opencdi` command and an "OpenCDi" entry in the desktop's Games menu.
+The package does not contain a BIOS; pick one in the launcher on first start.
+Remove it with `sudo apt remove opencdi`.
 
 ## Running
 

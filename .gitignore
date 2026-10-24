@@ -3,3 +3,7 @@ __pycache__/
 *.nvram
 opencdi_*.png
 philips-cd-i-misc-bios/
+dist/
+build/
+*.deb
+*.dpkg
