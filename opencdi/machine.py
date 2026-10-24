@@ -17,8 +17,9 @@ import numpy as np
 
 from .bus import Bus, Device
 from . import debuglog
+from .audio import OUT_RATE, LinearResampler
 from .cdic import CDIC
-from .m68k import M68070
+from .m68k_native import create_cpu
 from .mcd212 import MCD212
 from .nvram import MK48T08
 from .scc68070 import SCC68070
@@ -99,6 +100,8 @@ class Machine:
         self.lcd_text = ''
         self.audio_chunks = []
         self.audio_enabled = True
+        self._resampler = LinearResampler()
+        self._resample_rate = OUT_RATE
         self.frame = None
         self.frames = 0
         self._reset_pending = False
@@ -125,7 +128,7 @@ class Machine:
         bus.map_device(0x320000, 0x323fff, self.nvram)
         bus.map_device(0x4fffe0, 0x4fffff, self.video)
 
-        self.cpu = M68070(bus)
+        self.cpu = create_cpu(bus)
         self.scc.cpu = self.cpu
         self.scc.iack_callbacks = {4: self.cdic.intack}
         ns = self.cpu.ns
@@ -170,6 +173,7 @@ class Machine:
         self.scc.update_ipl()
         self.cpu.reset()
         self.line = 0
+        self._line_t = 0      # emulated time at which the next line starts
 
     def request_reset(self):
         self._reset_pending = True
@@ -189,17 +193,25 @@ class Machine:
     def audio_out(self, left, right, rate):
         if not self.audio_enabled or self.cdic.muted:
             return
-        if rate != 44100:
-            n = int(round(len(left) * 44100 / rate))
-            xs = np.linspace(0, len(left) - 1, n)
-            left = np.interp(xs, np.arange(len(left)), left)
-            right = np.interp(xs, np.arange(len(right)), right)
-        st = np.empty((len(left), 2), dtype=np.int16)
-        st[:, 0] = np.clip(left, -32768, 32767)
-        st[:, 1] = np.clip(right, -32768, 32767)
+        x = np.empty((len(left), 2), dtype=np.float32)
+        x[:, 0] = left
+        x[:, 1] = right
+        if rate != OUT_RATE:
+            # one continuous resampler per source rate, so sector boundaries
+            # do not click (0.1.2 resampled every sector on its own)
+            if rate != self._resample_rate:
+                dlog.debug('audio source rate %d Hz -> %d Hz', rate, OUT_RATE)
+                self._resampler.reset()
+                self._resample_rate = rate
+            x = self._resampler.process(x, rate / OUT_RATE)
+        elif self._resample_rate != OUT_RATE:
+            self._resampler.reset()
+            self._resample_rate = OUT_RATE
+        st = np.clip(x, -32768, 32767).astype(np.int16)
         self.audio_chunks.append(st)
         if len(self.audio_chunks) > 64:
             del self.audio_chunks[:-64]
+            dlog.debug('audio output not collected; oldest chunks dropped')
 
     def take_audio(self):
         if not self.audio_chunks:
@@ -220,8 +232,16 @@ class Machine:
                 s.now += cpu_run(n)
             s.run_due()
 
-    def run_frame(self):
-        """Emulate one video frame (312 lines PAL / 262 NTSC)."""
+    def frame_rate(self):
+        """Emulated frames per second (PAL 50.08 Hz, NTSC 60.05 Hz)."""
+        return self.sched.clock / (self.video.total_height * LINE_CYCLES)
+
+    def run_frame(self, render=True):
+        """Emulate one video frame (312 lines PAL / 262 NTSC).
+
+        With render=False the frame is emulated in full but its picture is
+        not drawn (frame skipping); self.frame keeps the previous picture."""
+        self.video.skip_render = not render
         if self._reset_pending:
             self._reset_pending = False
             self.reset()
@@ -238,7 +258,16 @@ class Machine:
             self.line += 1
             if self.line >= video.total_height:
                 self.line = 0
-            self.run_until(self.sched.now + LINE_CYCLES)
+            # lines start every LINE_CYCLES on a fixed timeline.  0.1.2 timed each
+            # line from where the CPU stopped, so every instruction that ran past
+            # a line end made the line longer: up to 22 % longer frames in
+            # Alice in Wonderland, which made CD audio arrive too fast for the
+            # frame rate (see docs/debug/0.1.3.md)
+            self._line_t += LINE_CYCLES
+            if self.sched.now - self._line_t > LINE_CYCLES * 1000:
+                dlog.debug('line timing %d cycles behind; resynchronised', self.sched.now - self._line_t)
+                self._line_t = self.sched.now
+            self.run_until(self._line_t)
             guard += 1
         return self.frame
 

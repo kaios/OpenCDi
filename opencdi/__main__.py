@@ -63,8 +63,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog='opencdi', description='Philips CD-i (Mono-I) emulator')
     ap.add_argument('disc', nargs='?', help='disc image (.cue/.bin or .iso)')
     ap.add_argument('--bios', help='CD-i system ROM; when given, starts immediately instead of showing the launcher')
-    ap.add_argument('--ntsc', action='store_true', help='report an NTSC player (60 Hz) instead of PAL')
-    ap.add_argument('--scale', type=float, default=1.0, help='window scale factor (default 1 = 768x560)')
+    region = ap.add_mutually_exclusive_group()
+    region.add_argument('--ntsc', action='store_true', help='NTSC player, 60 Hz video (the default)')
+    region.add_argument('--pal', action='store_true', help='PAL player, 50 Hz video')
+    ap.add_argument('--scale', type=float, default=1.0,
+                    help='window size as a multiple of the picture (default 1 = 768x480 NTSC, 768x560 PAL)')
     ap.add_argument('--fullscreen', action='store_true')
     ap.add_argument('--no-audio', action='store_true')
     ap.add_argument('--serial', action='store_true',
@@ -96,7 +99,7 @@ def main(argv=None):
     if args.headless:
         if not args.bios:
             sys.exit(f'--headless needs --bios PATH (download a BIOS from {BIOS_URL})')
-        m = build_machine(args.bios, args.disc, args.ntsc, log, serial_input)
+        m = build_machine(args.bios, args.disc, not args.pal, log, serial_input)
         m.audio_enabled = False
         t0 = time.time()
         for _ in range(args.headless):
@@ -112,22 +115,22 @@ def main(argv=None):
         return
 
     from .frontend import HELP, App, Emulator
-    from .launcher import Launcher, load_config, save_config
+    from .launcher import Launcher, load_config, save_config, use_ntsc
 
     cfg = load_config()
     if args.bios:
         cfg['bios'] = str(Path(args.bios).resolve())
     if args.disc:
         cfg['disc'] = str(Path(args.disc).resolve())
-    if args.ntsc:
-        cfg['ntsc'] = True
+    if args.ntsc or args.pal:
+        cfg['ntsc'] = args.ntsc
     save_config(cfg)
 
     app = App(scale=args.scale, fullscreen=args.fullscreen, audio=not args.no_audio)
     print(HELP)
     machine = None
     emulator = None
-    choice = ('start', cfg['bios'], cfg.get('disc'), bool(cfg.get('ntsc'))) if args.bios else None
+    choice = ('start', cfg['bios'], cfg.get('disc'), use_ntsc(cfg)) if args.bios else None
     message = ''
     try:
         while True:

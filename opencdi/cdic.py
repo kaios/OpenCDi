@@ -133,8 +133,11 @@ class CDIC(Device):
                 ev.cancel()
         period = self.m.sched.clock / 75
         self.tick_period = period
-        self.sector_event = self.m.sched.after(period, self.sector_tick)
-        self.audio_event = self.m.sched.after(period, self.audio_tick)
+        # sector and audio ticks keep a fixed 75 Hz timeline (rescheduling from
+        # the time the tick actually ran would add the CPU's overrun every time)
+        self._sector_t = self._audio_t = self.m.sched.now + period
+        self.sector_event = self.m.sched.at(self._sector_t, self.sector_tick)
+        self.audio_event = self.m.sched.at(self._audio_t, self.audio_tick)
         self.update_interrupt_state()
 
     def set_attenuation(self, gains):
@@ -282,7 +285,21 @@ class CDIC(Device):
         ram = self.ram
         bus = self.m.bus
         to_memory = ch.operation_control & 0x80
-        for i in range(count):
+        a0 = start & 0xffffff
+        o = a0 & 0xffff
+        n = count * 2
+        page = (bus.wp if to_memory else bus.rp)[a0 >> 16]
+        if page is not None and not a0 & 1 and o + n <= 0x10000 and dev + n <= 0x4000:
+            # within one RAM page and without wrapping the buffer: one slice
+            # copy does what the word loop below does
+            if to_memory:
+                page[o:o + n] = ram[dev:dev + n]
+            else:
+                ram[dev:dev + n] = page[o:o + n]
+            count_done = count
+        else:
+            count_done = 0
+        for i in range(count_done, count):
             a = (start + i * 2) & 0xffffff
             d = (dev + i * 2) & 0x3ffe
             if to_memory:
@@ -346,7 +363,8 @@ class CDIC(Device):
 
     # ----- sector processing ---------------------------------------------------------------
     def sector_tick(self):
-        self.sector_event = self.m.sched.after(self.tick_period, self.sector_tick)
+        self._sector_t += self.tick_period
+        self.sector_event = self.m.sched.at(max(self._sector_t, self.m.sched.now + 1), self.sector_tick)
         if self.disc_command == 0:
             return
         if self.disc_spinup_counter:
@@ -359,7 +377,8 @@ class CDIC(Device):
         self.curr_lba += 1
 
     def audio_tick(self):
-        self.audio_event = self.m.sched.after(self.tick_period, self.audio_tick)
+        self._audio_t += self.tick_period
+        self.audio_event = self.m.sched.at(max(self._audio_t, self.m.sched.now + 1), self.audio_tick)
         if self.audio_sector_counter > 0:
             self.audio_sector_counter -= 1
             if self.audio_sector_counter > 0:
@@ -619,17 +638,5 @@ class CDIC(Device):
             left = outs[0]
             right = outs[1] if stereo else left
         out_l, out_r = self.attenuate(left, right)
-        if half_rate:
-            out_l = _upsample2(out_l)
-            out_r = _upsample2(out_r)
-        self.m.audio_out(out_l, out_r, XA_RATE)
-
-
-def _upsample2(x):
-    out = np.empty(len(x) * 2, dtype=np.float32)
-    out[1::2] = x
-    mid = np.empty_like(x)
-    mid[0] = x[0]
-    mid[1:] = (x[:-1] + x[1:]) * 0.5
-    out[0::2] = mid
-    return out
+        # 18.9 kHz goes to the machine's streaming resampler as it is
+        self.m.audio_out(out_l, out_r, XA_RATE // 2 if half_rate else XA_RATE)

@@ -3,6 +3,9 @@
 
 Usage: run_sst.py DIR_WITH_JSON_BIN [NAME ...]
 
+Runs the native (C) core when it can be built; OPENCDI_CPU=python tests the
+Python core instead.  The first line of output says which one ran.
+
 The core is switched to plain 68000 exception frames for the run, and trace
 exceptions are turned off because the tests record the state right after the
 instruction (before a trace exception would be taken).  Tests that raise
@@ -14,7 +17,7 @@ from struct import unpack_from
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from opencdi.bus import Bus  # noqa: E402
-from opencdi.m68k import M68070  # noqa: E402
+from opencdi.m68k_native import create_cpu  # noqa: E402
 
 REGS = ['d0', 'd1', 'd2', 'd3', 'd4', 'd5', 'd6', 'd7',
         'a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'usp', 'ssp', 'sr', 'pc']
@@ -80,7 +83,8 @@ def main():
         files = [f for f in files if f.name.split('.json')[0] in names]
     bus = Bus(internal_space=False)
     ram = bus.map_ram('ram', 0, 0x1000000)
-    cpu = M68070(bus)
+    cpu = create_cpu(bus)
+    print('core:', 'native' if getattr(cpu, 'native', False) else 'python', flush=True)
     ns = cpu.ns
     ns['FRAME_FORMAT'] = False
     ns['TRACE'] = False

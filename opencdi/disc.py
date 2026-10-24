@@ -121,6 +121,16 @@ class Disc:
                 kind = 'mode1'
         return Track(1, kind, path, 0, ss, 0, length)
 
+    @staticmethod
+    def _renamed_bin(cue, name):
+        """The file a cue sheet names is missing: images are often renamed
+        without editing the sheet, so use the .bin/.img named like the cue."""
+        for cand in cue.parent.iterdir():
+            if cand.stem.lower() == cue.stem.lower() and cand.suffix.lower() in ('.bin', '.img', '.raw'):
+                dlog.info('%s: "%s" not found; using %s (named like the cue sheet)', cue, name, cand.name)
+                return cand
+        raise ValueError(f'"{name}" (named in the cue sheet) not found next to {cue.name}')
+
     def _parse_cue(self, cue):
         text = cue.read_text(errors='replace')
         entries = []
@@ -144,6 +154,8 @@ class Disc:
                         if cand.name.lower() == Path(name).name.lower():
                             p = cand
                             break
+                if not p.exists():
+                    p = self._renamed_bin(cue, name)
                 cur_file = p
             elif cmd == 'TRACK':
                 mode = parts[2].upper()

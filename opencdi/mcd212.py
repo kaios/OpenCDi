@@ -8,6 +8,7 @@ records with numpy, which batches runs of lines that share a state.
 Ported from MAME's mcd212.cpp (BSD-3-Clause, Ryan Holtz, Vincent Halver).
 """
 
+import os
 import struct
 
 import numpy as np
@@ -30,6 +31,9 @@ TCR_DISABLE_MX = 0x800000
 CURCNT_EN, CURCNT_CUW, CURCNT_BLKC = 0x800000, 0x008000, 0x400000
 
 _UNPACK16 = struct.Struct('>16I').unpack
+_UNPACK1 = struct.Struct('>I').unpack_from
+_DE = 1 << DCR_DE_BIT
+_ICA_DCA = 1 << DCR_ICA_BIT | 1 << DCR_DCA_BIT
 COLOR_OFF = 0x101010   # s_4bpp_color[0]
 DISPLAY_COLORS = [0x000000, 0x00007b, 0x007b00, 0x007b7b, 0x7b0000, 0x7b007b, 0x7b7b00, 0x7b7b7b,
                   0x000000, 0x0000f9, 0x00f900, 0x00f9f9, 0xf90000, 0xf900f9, 0xf9f900, 0xf9f9f9]
@@ -46,6 +50,27 @@ V_TO_R = (351 * (_sw - 128)) >> 8
 # output stage: studio levels (16..235) expanded to full range
 EXPAND = LIMIT[(((np.arange(256) - 16) * 298 + 128) >> 8) + 0x100].astype(np.uint32)
 _MIX_TABLES = {}
+
+
+# lookup tables in the layout the native helpers (native/video.c) take
+_DELTAS32 = np.ascontiguousarray(DYUV_DELTAS, dtype=np.int32)
+_LIMIT_FE32 = np.ascontiguousarray(LIMIT_FE, dtype=np.int32)
+_LIMIT32 = np.ascontiguousarray(LIMIT, dtype=np.int32)
+_EXPAND32 = np.ascontiguousarray(EXPAND, dtype=np.uint32)
+_U_TO_B32, _U_TO_G32, _V_TO_G32, _V_TO_R32 = (np.ascontiguousarray(t, dtype=np.int32)
+                                               for t in (U_TO_B, U_TO_G, V_TO_G, V_TO_R))
+_native = []
+
+
+def native_lib():
+    """The native library for render_dyuv()/mix(), or None for numpy."""
+    if not _native:
+        lib = None
+        if os.environ.get('OPENCDI_CPU', 'native').lower() != 'python':
+            from . import m68k_native
+            lib = m68k_native.load()
+        _native.append(lib)
+    return _native[0]
 
 
 def mix_table(wa, wb):
@@ -82,10 +107,13 @@ def byte_to_clut_lut(icm, path, clut_select, nibble=None, mask=0xf):
 
 
 class PlaneLine:
-    __slots__ = ('kind', 'vsr', 'vsr2', 'key', 'runs')
+    # vend/vend2: where the line's pixel data ends (the next vsr), so the frame
+    # cache knows exactly which plane bytes the picture was made from
+    __slots__ = ('kind', 'vsr', 'vsr2', 'key', 'runs', 'vend', 'vend2')
 
     def __init__(self, kind, key, vsr=0, vsr2=0, runs=None):
         self.kind, self.key, self.vsr, self.vsr2, self.runs = kind, key, vsr, vsr2, runs
+        self.vend = self.vend2 = None
 
 
 class MCD212(Device):
@@ -96,6 +124,8 @@ class MCD212(Device):
         self.frame_count = 0
         self.prev_field = None
         self._cursor_logged = None
+        self.skip_render = False   # set by the machine for frame skipping
+        self.render_stats = [0, 0, 0]   # rendered, reused from cache, skipped
         self.reset()
 
     def reset(self):
@@ -134,6 +164,16 @@ class MCD212(Device):
         self.lines = []
         self.snap = None
         self.rle_cache = [{}, {}]
+        # last rendered picture (before the cursor) and what it was made from;
+        # clut_ver/matte_ver restart at 0 here, so the cache must not survive
+        self._cache_sig = None
+        self._cache_used = None     # (address ranges, bytes) from used_plane_bytes()
+        self._cache_out = None
+        # plane_line()/process_dca() caches: decoder state per plane, valid while
+        # state_ver is unchanged, and decoded DCA blocks by address
+        self.state_ver = 0
+        self._pl_state = [None, None]
+        self._dca_cache = [{}, {}]
         self.update_frame_geometry()
 
     # ----- helpers -----------------------------------------------------------
@@ -171,6 +211,7 @@ class MCD212(Device):
         self.ddr[p] = (self.ddr[p] & 0xffc0) | ((v >> 16) & 0x3f)
 
     def set_display_parameters(self, p, v):
+        self.state_ver += 1
         self.ddr[p] = (self.ddr[p] & 0xf0ff) | ((v & 0x0f) << 8)
         self.dcr[p] = (self.dcr[p] & 0xf7ff) | ((v & 0x10) << 7)
 
@@ -194,6 +235,7 @@ class MCD212(Device):
 
     # ----- registers written by ICA/DCA -----------------------------------------------
     def set_register(self, p, reg, value):
+        self.state_ver += 1
         if 0x80 <= reg < 0xc0:
             i = (self.clut_bank[p] * 0x40 + (reg - 0x80)) & 0xff
             value &= 0x00fcfcfc
@@ -316,6 +358,7 @@ class MCD212(Device):
         self.weight = new_w
         self.matte_flag = new_f
         self.matte_ver += 1
+        self.state_ver += 1
 
     # ----- ICA / DCA ---------------------------------------------------------------------
     def process_ica(self):
@@ -332,7 +375,12 @@ class MCD212(Device):
 
     def ica_command(self, p, addr):
         a = addr[p]
-        cmd = self.plane_word(p, a) << 16 | self.plane_word(p, a + 1)
+        b = (a * 2) & 0x7fffe
+        if b <= 0x7fffc and self.snap is not None:
+            # frame_start() has just taken the snapshot, so it matches plane memory
+            cmd = _UNPACK1(self.snap[p], b)[0]
+        else:
+            cmd = self.plane_word(p, a) << 16 | self.plane_word(p, a + 1)
         addr[p] = a + 2
         op = cmd >> 24
         hi = op >> 4
@@ -369,34 +417,57 @@ class MCD212(Device):
             blk = pages[addr >> 16][o:o + 64]
         else:
             blk = bytes(pages[addr >> 16][o:]) + bytes(pages[((addr >> 16) + 1) & 7][:64 - (0x10000 - o)])
-        count = 0
+        # most lines run the same block as in the previous frame: decode a
+        # block once and replay its actions while its bytes are unchanged
+        cache = self._dca_cache[p]
+        hit = cache.get(addr)
+        if hit is None or hit[0] != blk:
+            if len(cache) > 4096:
+                cache.clear()
+            hit = cache[addr] = (bytes(blk),) + self._decode_dca(blk, addr)
+        for code, a, b in hit[1]:
+            if code == 0:
+                self.set_vsr(p, a)
+            elif code == 3:
+                self.set_register(p, a, b)
+            elif code == 1:
+                self.raise_interrupt(p)
+            elif code == 2:
+                self.set_display_parameters(p, a)
+            else:
+                self.set_dcp(p, a)
+        self.dca[p] = hit[2]
+
+    @staticmethod
+    def _decode_dca(blk, addr):
+        """One 64-byte DCA block as (actions, next DCA address); actions are
+        (0 vsr | 1 interrupt | 2 display parameters | 3 register | 4 dcp, a, b)."""
+        acts = []
         for cmd in _UNPACK16(blk):
-            count += 4
             hi = cmd >> 28
             if hi == 1 or hi == 2:
                 continue
             if hi == 0:
                 break
             if hi == 3:
-                self.set_dcp(p, cmd & 0x003ffffc)
-                self.dca[p] = cmd & 0x0007fffc
-                return
+                acts.append((4, cmd & 0x003ffffc, 0))
+                return tuple(acts), cmd & 0x0007fffc
             if hi == 4:
-                self.set_vsr(p, cmd & 0x003fffff)
+                acts.append((0, cmd & 0x003fffff, 0))
                 continue
             if hi == 5:
-                self.set_vsr(p, cmd & 0x003fffff)
+                acts.append((0, cmd & 0x003fffff, 0))
                 break
             if hi == 6:
-                self.raise_interrupt(p)
+                acts.append((1, 0, 0))
                 continue
             op = cmd >> 24
             if op >= 0x78 and hi == 7:
-                self.set_display_parameters(p, cmd & 0x1f)
+                acts.append((2, cmd & 0x1f, 0))
                 continue
-            self.set_register(p, op, cmd & 0x00ffffff)
+            acts.append((3, op, cmd & 0x00ffffff))
         # the DCA always consumes a whole 64-byte block per line
-        self.dca[p] = addr + 64
+        return tuple(acts), addr + 64
 
     # ----- line timing (called by the machine) ------------------------------------------------
     def frame_start(self):
@@ -443,10 +514,12 @@ class MCD212(Device):
             self.lines.append(None)
         if line == self.total_height - 1:
             self.csrr[0] ^= CSR1R_PA
-        if self.dca_enabled(1):
-            self.process_dca(1)
-        if self.dca_enabled(0):
-            self.process_dca(0)
+        dcr = self.dcr
+        if dcr[0] & _DE:      # dca_enabled(), inlined: this runs twice per line
+            if dcr[1] & _ICA_DCA == _ICA_DCA:
+                self.process_dca(1)
+            if dcr[0] & _ICA_DCA == _ICA_DCA:
+                self.process_dca(0)
         if line == self.total_height - 1:
             self.render_frame()
 
@@ -456,13 +529,11 @@ class MCD212(Device):
             self._clut_np_ver = self.clut_ver
         return self._clut_np
 
-    def plane_line(self, p):
+    def _plane_state(self, p):
+        """Decoder state for plane p that only changes with a register write."""
         icm = self.get_icm(p)
         tp_ctrl = (self.tcr >> (8 if p else 0)) & 0x0f
         width = self.screen_width()
-        vsr = self.get_vsr(p)
-        if not icm or not vsr:
-            return PlaneLine('off', ('off', tp_ctrl, width))
         ft = self.ddr[p] & DDR_FT
         clut_select = bool(self.icm >> ICM_CS_BIT & 1)
         mosaic = ft == DDR_FT_MOSAIC
@@ -471,10 +542,24 @@ class MCD212(Device):
                self.trans_color[p], self.mask_color[p], self.matte_ver, width)
         if icm == ICM_DYUV:
             key = key + (self.dyuv_start[p],)
+        st = (self.state_ver, icm, ('off', tp_ctrl, width), width, ft, mosaic, factor, key,
+              (self.clut_array(), self.matte_flag, self.weight))
+        self._pl_state[p] = st
+        return st
+
+    def plane_line(self, p):
+        st = self._pl_state[p]
+        if st is None or st[0] != self.state_ver:
+            st = self._plane_state(p)
+        _ver, icm, off_key, width, ft, mosaic, factor, key, state = st
+        vsr = (self.dcr[p] & 0x3f) << 16 | self.vsr[p]
+        if not icm or not vsr:
+            return PlaneLine('off', off_key)
+        if icm == ICM_DYUV:
             rec = PlaneLine('dyuv', key, vsr)
-            rec.key = key
-            self._attach_state(rec, p)
-            self.set_vsr(p, vsr + 2 * (width // 4))
+            rec.runs = (None,) + state
+            rec.vend = vsr + 2 * (width // 4)
+            self.set_vsr(p, rec.vend)
             return rec
         rgb = icm == ICM_RGB555 and p == 1
         if ft == DDR_FT_RLE and not rgb:
@@ -483,8 +568,8 @@ class MCD212(Device):
             if hit is not None:
                 raw, runs, v = hit
                 if data[vsr & 0x7ffff:(vsr & 0x7ffff) + len(raw)] == raw:
-                    rec = PlaneLine('rle', key, vsr, runs=runs)
-                    self._attach_state(rec, p)
+                    rec = PlaneLine('rle', key, vsr, runs=(runs,) + state)
+                    rec.vend = v
                     self.set_vsr(p, v)
                     return rec
             x = 0
@@ -513,27 +598,23 @@ class MCD212(Device):
                 if len(cache) > 4096:
                     cache.clear()
                 cache[(vsr, width)] = (data[start:start + (v - vsr)], runs, v)
-            rec = PlaneLine('rle', key, vsr, runs=runs)
-            self._attach_state(rec, p)
+            rec = PlaneLine('rle', key, vsr, runs=(runs,) + state)
+            rec.vend = v
             self.set_vsr(p, v)
             return rec
         lm = factor * 2 if mosaic else 2
         nb = -(-width // lm)
         if rgb:
             vsr2 = self.get_vsr(0)
-            rec = PlaneLine('rgb', key, vsr, vsr2)
-            self._attach_state(rec, p)
+            rec = PlaneLine('rgb', key, vsr, vsr2, runs=(None,) + state)
+            rec.vend, rec.vend2 = vsr + nb, vsr2 + nb
             self.set_vsr(p, vsr + nb)
             self.set_vsr(0, vsr2 + nb)
             return rec
-        rec = PlaneLine('bmp', key, vsr)
-        self._attach_state(rec, p)
+        rec = PlaneLine('bmp', key, vsr, runs=(None,) + state)
+        rec.vend = vsr + nb
         self.set_vsr(p, vsr + nb)
         return rec
-
-    def _attach_state(self, rec, p):
-        # keep references to the state this line uses (the arrays are replaced, never mutated)
-        rec.runs = (rec.runs, self.clut_array(), self.matte_flag, self.weight)
 
     def mix_key(self):
         return (self.get_icm(0), self.get_icm(1), bool(self.tcr & TCR_DISABLE_MX), self.plane_order & 1,
@@ -593,6 +674,7 @@ class MCD212(Device):
             self._write(a & 0x1e, v << 8, 0xff00)
 
     def _write(self, o, v, mask):
+        self.state_ver += 1
         def comb(old):
             return (old & ~mask) | (v & mask)
         if o == 0x00:
@@ -619,9 +701,83 @@ class MCD212(Device):
             self.dca[0] = comb(self.dca[0])
 
     # ----- rendering -------------------------------------------------------------------------------
+    def frame_signature(self):
+        """Everything the picture depends on besides plane memory and the cursor.
+
+        Line keys hold the decoder state, including clut_ver/matte_ver, so equal
+        signatures plus equal plane memory give an identical picture."""
+        return [None if rec is None else
+                (rec[0].kind, rec[0].key, rec[0].vsr, rec[0].vsr2,
+                 rec[1].kind, rec[1].key, rec[1].vsr, rec[1].vsr2, rec[2])
+                for rec in self.lines]
+
+    def used_plane_bytes(self):
+        """The plane memory bytes this frame's picture reads, as one bytes object
+        (plus the address ranges, so equal results mean equal input)."""
+        # consecutive lines usually continue where the previous one ended:
+        # join those straight away, the merge below handles the rest
+        runs = ([], [])
+
+        def add(p, start, end):
+            r = runs[p]
+            if end <= start:
+                return
+            if r and r[-1][1] == start:
+                r[-1][1] = end
+            else:
+                r.append([start, end])
+
+        for rec in self.lines:
+            if rec is None:
+                continue
+            for p in (0, 1):
+                line = rec[p]
+                kind = line.kind
+                if kind == 'off':
+                    continue
+                add(p, line.vsr, line.vend)
+                if kind == 'rgb':
+                    add(0, line.vsr2, line.vend2)   # RGB555 takes half of each pixel from plane A
+        pieces = []
+        for p, start, end in [(p, a, b) for p in (0, 1) for a, b in runs[p]]:
+            s0 = start & 0x7ffff
+            n = max(end - start, 0)
+            while n > 0:                                       # the decoders wrap at 512 KiB
+                k = min(n, 0x80000 - s0)
+                pieces.append((p, s0, s0 + k))
+                s0, n = 0, n - k
+        pieces.sort()
+        merged = []
+        for p, a, b in pieces:
+            if merged and merged[-1][0] == p and a <= merged[-1][2]:
+                if b > merged[-1][2]:
+                    merged[-1][2] = b
+            else:
+                merged.append([p, a, b])
+        snap = self.snap
+        return tuple(map(tuple, merged)), b''.join(snap[p][a:b] for p, a, b in merged)
+
     def render_frame(self):
+        if self.skip_render:
+            # frame skipping: the frame was emulated in full, only its picture
+            # is not drawn; the previous picture stays on screen
+            self.render_stats[2] += 1
+            self.frame_count += 1
+            self.m.frame_ready(self.frame)
+            return
         lines = self.lines
         n = len(lines)
+        sig = self.frame_signature()
+        used = self.used_plane_bytes()
+        if self._cache_out is not None and sig == self._cache_sig and used == self._cache_used:
+            # nothing the picture depends on changed: reuse it
+            self.render_stats[1] += 1
+            out = self._cache_out.copy()
+            if n:
+                self.draw_cursor(out)
+            self._finish_frame(out)
+            return
+        self.render_stats[0] += 1
         out = np.zeros((n, 768), dtype=np.uint32)
         if n:
             planes = [np.frombuffer(self.snap[0], dtype=np.uint8), np.frombuffer(self.snap[1], dtype=np.uint8)]
@@ -641,7 +797,15 @@ class MCD212(Device):
                 cb, tb = self.render_plane(planes, [g[1] for g in group], 1)
                 out[i:j] = self.mix(ca, ta, cb, tb, rec)
                 i = j
+        self._cache_sig = sig
+        self._cache_used = used
+        self._cache_out = out.copy()
+        if n:
             self.draw_cursor(out)
+        self._finish_frame(out)
+
+    def _finish_frame(self, out):
+        n = out.shape[0]
         self.frame_count += 1
         interlace = bool(self.dcr[0] >> DCR_SM_BIT & 1)
         full = np.empty((n * 2, 768), dtype=np.uint32)
@@ -747,6 +911,15 @@ class MCD212(Device):
         return colors, tr
 
     def render_dyuv(self, data, vsrs, width, start):
+        lib = native_lib()
+        if lib is not None:
+            vsrs = np.ascontiguousarray(vsrs, dtype=np.int64)
+            n = len(vsrs)
+            out = np.empty((n, width), dtype=np.uint32)
+            lib.vid_dyuv(data.ctypes.data, vsrs.ctypes.data, n, width, start, _DELTAS32.ctypes.data,
+                         _LIMIT_FE32.ctypes.data, _U_TO_B32.ctypes.data, _U_TO_G32.ctypes.data,
+                         _V_TO_G32.ctypes.data, _V_TO_R32.ctypes.data, COLOR_OFF, out.ctypes.data)
+            return out
         pairs = width // 4
         n = len(vsrs)
         idx = (vsrs[:, None] + np.arange(pairs * 2)[None, :]) & 0x7ffff
@@ -803,6 +976,20 @@ class MCD212(Device):
         if mh_b & 0x800000 and mcb:
             xs = np.arange(width)
             cb = cb[:, xs - xs % mcb]
+        lib = native_lib()
+        if lib is not None:
+            ca = np.ascontiguousarray(ca, dtype=np.uint32)
+            cb = np.ascontiguousarray(cb, dtype=np.uint32)
+            ta8 = np.ascontiguousarray(ta, dtype=bool).view(np.uint8)
+            tb8 = np.ascontiguousarray(tb, dtype=bool).view(np.uint8)
+            wa = np.ascontiguousarray(weights[0][:width], dtype=np.int32)
+            wb = np.ascontiguousarray(weights[1][:width], dtype=np.int32)
+            out = np.empty((n, 768), dtype=np.uint32)
+            lib.vid_mix(ca.ctypes.data, ta8.ctypes.data, cb.ctypes.data, tb8.ctypes.data, n, width,
+                        wa.ctypes.data, wb.ctypes.data, 1 if disable_mx else 0, 1 if order_ba else 0,
+                        DISPLAY_COLORS[0] if ext_video else DISPLAY_COLORS[backdrop],
+                        _LIMIT32.ctypes.data, _EXPAND32.ctypes.data, border, COLOR_OFF, out.ctypes.data)
+            return out
         a = np.where(ta, COLOR_OFF, ca)
         b = np.where(tb, COLOR_OFF, cb)
         if disable_mx:

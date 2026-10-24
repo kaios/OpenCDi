@@ -39,6 +39,11 @@ def load_config():
         return {}
 
 
+def use_ntsc(cfg):
+    """NTSC (60 Hz) unless PAL was chosen; 0.1.3 and earlier defaulted to PAL (50 Hz)."""
+    return bool(cfg.get('ntsc', True))
+
+
 def save_config(cfg):
     try:
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +98,7 @@ class Screen:
 
     def __init__(self, app):
         self.app = app
+        app.set_content_size(BASE_SIZE)
         self.canvas = pygame.Surface(BASE_SIZE)
         self.font = pygame.font.Font(None, 26)
         self.small = pygame.font.Font(None, 21)
@@ -351,7 +357,7 @@ class Launcher:
         self.check_bios()
 
     def session_key(self):
-        return self.cfg.get('bios'), self.cfg.get('disc'), bool(self.cfg.get('ntsc'))
+        return self.cfg.get('bios'), self.cfg.get('disc'), use_ntsc(self.cfg)
 
     def check_bios(self):
         b = self.cfg.get('bios')
@@ -371,7 +377,7 @@ class Launcher:
         items.append(('disc', 'Disc:  ' + (Path(disc).name if disc else '(no disc - player menu)')))
         if disc:
             items.append(('eject', 'Eject disc'))
-        items.append(('region', 'Video:  ' + ('NTSC (60 Hz)' if self.cfg.get('ntsc') else 'PAL (50 Hz)')))
+        items.append(('region', 'Video:  ' + ('NTSC (60 Hz)' if use_ntsc(self.cfg) else 'PAL (50 Hz)')))
         items.append(('quit', 'Quit'))
         return items
 
@@ -391,7 +397,7 @@ class Launcher:
                 self.message = 'Select a working CD-i BIOS first.'
                 return None
             save_config(cfg)
-            return ('start', cfg['bios'], cfg.get('disc'), bool(cfg.get('ntsc')))
+            return ('start', cfg['bios'], cfg.get('disc'), use_ntsc(cfg))
         if key == 'bios':
             start = cfg.get('bios_dir') or (str(Path(cfg['bios']).parent) if cfg.get('bios') else None)
             fb = FileBrowser(self.screen, self.nav, 'Select CD-i BIOS (system ROM)', start, BIOS_EXT,
@@ -421,7 +427,7 @@ class Launcher:
             cfg.pop('disc', None)
             save_config(cfg)
         elif key == 'region':
-            cfg['ntsc'] = not cfg.get('ntsc')
+            cfg['ntsc'] = not use_ntsc(cfg)
             save_config(cfg)
         elif key == 'quit':
             return ('quit',)

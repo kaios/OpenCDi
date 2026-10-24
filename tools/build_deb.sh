@@ -1,8 +1,12 @@
 #!/bin/sh
-# Build a Debian package: tools/build_deb.sh [output dir]  ->  opencdi_<version>_all.deb
+# Build a Debian package: tools/build_deb.sh [output dir]  ->  opencdi_<version>_<arch>.deb
 #
 # The package installs the emulator only.  No BIOS is included; users select
 # their own CD-i system ROM in the launcher.
+#
+# Since 0.1.3 the package contains the native CPU core and picture helpers
+# (opencdi/native, compiled here with the system C compiler), so it is built
+# for this machine's architecture instead of "all".
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -23,6 +27,11 @@ mkdir -p "$SITE"
 cp -r "$ROOT/opencdi" "$SITE/"
 find "$SITE" -name __pycache__ -prune -exec rm -rf {} +
 find "$SITE" -name '*.pyc' -delete
+rm -f "$SITE"/opencdi/native/_m68k_*.so
+PYTHONPATH="$SITE" python3 -m opencdi.m68k_native "$SITE/opencdi/native" >/dev/null
+find "$SITE" -name __pycache__ -prune -exec rm -rf {} +
+ls "$SITE"/opencdi/native/_m68k_*.so >/dev/null
+ARCH=$(dpkg --print-architecture)
 install -D -m 755 "$PKG/opencdi.sh" "$D/usr/bin/opencdi"
 install -D -m 644 "$PKG/opencdi.desktop" "$D/usr/share/applications/opencdi.desktop"
 for icon in "$PKG"/icons/*/opencdi.png; do
@@ -58,15 +67,16 @@ SIZE=$(du -sk --exclude=DEBIAN "$D" | cut -f1)
 cat > "$D/DEBIAN/control" <<EOF
 Package: opencdi
 Version: $VERSION
-Architecture: all
+Architecture: $ARCH
 Maintainer: $MAINTAINER <$EMAIL>
 Installed-Size: $SIZE
-Depends: python3 (>= 3.9), python3-numpy (>= 1:1.21), python3-pygame (>= 2.1)
+Depends: libc6, python3 (>= 3.9), python3-numpy (>= 1:1.21), python3-pygame (>= 2.1)
 Section: games
 Priority: optional
 Description: Philips CD-i (Mono-I) emulator
  OpenCDi emulates the Philips CD-i Mono-I player (SCC68070 CPU, MCD212 video,
- CDIC CD controller) and runs .cue/.bin and .iso disc images. Keyboard, mouse
+ CDIC CD controller) and runs .cue/.bin and .iso disc images. The CPU core
+ and the picture decoders are compiled to native code. Keyboard, mouse
  and any SDL-supported game controller can drive the CD-i pointer.
  .
  A CD-i system ROM (BIOS) is required and is not included; select it in the
@@ -100,6 +110,6 @@ find "$D" -path "$D/DEBIAN" -prune -o -type d -exec chmod 755 {} +
 find "$SITE" -type f -exec chmod 644 {} +
 
 mkdir -p "$OUT"
-DEB=$OUT/opencdi_${VERSION}_all.deb
+DEB=$OUT/opencdi_${VERSION}_${ARCH}.deb
 dpkg-deb --root-owner-group -Zxz --build "$D" "$DEB"
 echo "built $DEB"

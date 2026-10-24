@@ -7,3 +7,5 @@ dist/
 build/
 *.deb
 *.dpkg
+# native CPU core built on first run (opencdi/m68k_native.py)
+opencdi/native/_m68k_*.so
