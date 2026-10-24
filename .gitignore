@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+*.nvram
+opencdi_*.png
+philips-cd-i-misc-bios/
