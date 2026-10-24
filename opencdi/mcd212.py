@@ -12,12 +12,14 @@ import struct
 
 import numpy as np
 
+from . import debuglog
 from .bus import Device
+
+dlog = debuglog.get('mcd212')
 
 CSR1R_PA = 0x20
 CSR1R_DA = 0x80
 CSR1W_ST_BIT = 1
-CSR1W_DD_BIT = 3
 CSR2R_IT2, CSR2R_IT1 = 0x02, 0x04
 DCR_DCA_BIT, DCR_ICA_BIT, DCR_CM_BIT, DCR_SM_BIT, DCR_FD_BIT, DCR_CF_BIT, DCR_DE_BIT = 8, 9, 11, 12, 13, 14, 15
 DDR_FT, DDR_FT_RLE, DDR_FT_MOSAIC = 0x0300, 0x0200, 0x0300
@@ -93,6 +95,7 @@ class MCD212(Device):
         self.frame = None
         self.frame_count = 0
         self.prev_field = None
+        self._cursor_logged = None
         self.reset()
 
     def reset(self):
@@ -615,10 +618,6 @@ class MCD212(Device):
         elif o == 0x1a:
             self.dca[0] = comb(self.dca[0])
 
-    def rom_wait_cycles(self):
-        clks = (4, 6, 8, 10)[(self.csrw[0] >> 8) & 3] if self.csrw[0] >> CSR1W_DD_BIT & 1 else 12
-        return max(clks // 2 - 4, 0)
-
     # ----- rendering -------------------------------------------------------------------------------
     def render_frame(self):
         lines = self.lines
@@ -857,6 +856,12 @@ class MCD212(Device):
         res = 1 if cc & CURCNT_CUW else 2
         color = DISPLAY_COLORS[color_index]
         width = self.screen_width()
+        # the picture sits after the border in 720-pixel mode; the cursor
+        # position is relative to the picture, so it moves with it
+        border = self.border_width()
+        if border and self._cursor_logged != (cx, cy):
+            self._cursor_logged = (cx, cy)
+            dlog.debug('cursor at %d,%d drawn at x=%d (720-pixel mode, border %d)', cx, cy, cx + border, border)
         for y in range(16):
             row = cy + y
             if not 0 <= row < out.shape[0]:
@@ -869,4 +874,4 @@ class MCD212(Device):
                     for j in range(res):
                         idx = cx + x * res + j
                         if idx < width:
-                            out[row, idx] = color
+                            out[row, border + idx] = color

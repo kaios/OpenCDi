@@ -6,7 +6,10 @@ audio attenuation and some system status queries.  Mapped at 0x310000.
 Ported from MAME's cdislavehle.cpp (BSD-3-Clause, Ryan Holtz).
 """
 
+from . import debuglog
 from .bus import Device
+
+dlog = debuglog.get('slave')
 
 ATTENUATION = [
     0xff, 0xe4, 0xcb, 0xb5, 0xa2, 0x90, 0x80, 0x72,
@@ -146,6 +149,13 @@ class Slave(Device):
 
     def slave_w(self, offset, data):
         if offset == 1 and self.in_index == 0:
+            self._clear_in()
+            return
+        if self.in_index >= len(self.in_buf):
+            # a command sequence the HLE does not understand ran past the
+            # 17-byte buffer; drop it instead of raising IndexError
+            dlog.warning('input buffer overflow (offset %d, data %02x, buffer %s); command dropped',
+                         offset, data, ' '.join(f'{b:02x}' for b in self.in_buf))
             self._clear_in()
             return
         self.in_buf[self.in_index] = data

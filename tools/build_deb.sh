@@ -32,6 +32,9 @@ done
 # documentation
 DOC=$D/usr/share/doc/opencdi
 install -D -m 644 "$ROOT/README.md" "$DOC/README.md"
+for note in "$ROOT"/docs/debug/*.md; do
+    install -D -m 644 "$note" "$DOC/debug/$(basename "$note")"
+done
 cat > "$DOC/copyright" <<EOF
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: OpenCDi

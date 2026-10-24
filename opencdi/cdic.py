@@ -10,7 +10,10 @@ The buffer RAM is kept in big-endian (CPU) byte order.
 
 import numpy as np
 
+from . import debuglog
 from .bus import Device
+
+dlog = debuglog.get('cdic')
 
 DISC_NONE, DISC_MODE1, DISC_MODE2, DISC_CDDA, DISC_TOC = range(5)
 
@@ -33,6 +36,8 @@ CODING_CHAN_MASK, CODING_MONO, CODING_STEREO = 0x03, 0x00, 0x01
 NO_MAP_POSITION = 0xffff
 XA_FILTER = [(0, 0), (0xF0, 0), (0x1CC, -0xD0), (0x188, -0xDC)]
 XA_RATE = 37800          # 45.1584 MHz * 3/7 / 512
+# attenuation after reset: left -> left and right -> right at full volume, no cross-feed
+DEFAULT_ATTEN = (0xff, 0x00, 0xff, 0x00)
 
 
 def _scramble_table():
@@ -95,7 +100,6 @@ class CDIC(Device):
         self.sector_event = None
         self.audio_event = None
         self.muted = False
-        self.atten = [0xff, 0x00, 0xff, 0x00]
         self.reset()
 
     def reset(self):
@@ -119,7 +123,7 @@ class CDIC(Device):
         self.audio_format_sectors = 0
         self.decoding_audio_map = False
         self.decode_addr = NO_MAP_POSITION
-        self.atten = [0xff, 0xff, 0xff, 0xff]
+        self.atten = list(DEFAULT_ATTEN)
         self.xa_last = [0, 0, 0, 0]
         self.deemph_x1 = [0.0, 0.0]
         self.deemph_y1 = [0.0, 0.0]
@@ -135,6 +139,7 @@ class CDIC(Device):
 
     def set_attenuation(self, gains):
         self.atten = list(gains)
+        dlog.debug('attenuation LL=%02x LR=%02x RR=%02x RL=%02x', *self.atten)
 
     # ----- interrupts ---------------------------------------------------------
     def update_interrupt_state(self):
@@ -287,6 +292,14 @@ class CDIC(Device):
                 ram[d] = v >> 8
                 ram[d + 1] = v & 0xff
         ch.memory_address_counter = (ch.memory_address_counter + count * 2) & 0xffffffff
+        # the transfer is instantaneous: leave the channel registers as the
+        # SCC68070 does after a finished transfer
+        ch.device_address_counter = (ch.device_address_counter + count * 2) & 0xffffffff
+        ch.transfer_counter = 0
+        ch.status |= 0x80   # CSR COC: channel operation complete
+        self.m.scc.update_ipl()
+        dlog.debug('DMA %s %d words, memory %06x, buffer %04x', 'buffer->memory' if to_memory else 'memory->buffer',
+                   count, start & 0xffffff, dev)
 
     # ----- commands ----------------------------------------------------------------
     def lba_from_time(self):
@@ -535,7 +548,16 @@ class CDIC(Device):
             s = s.byteswap()
         left = s[0::2].astype(np.float32)
         right = s[1::2].astype(np.float32)
-        self.m.audio_out(left, right, 44100)
+        out_l, out_r = self.attenuate(left, right)
+        self.m.audio_out(out_l, out_r, 44100)
+
+    def attenuate(self, left, right):
+        """Apply the SLAVE volume matrix (same for CD-DA and ADPCM)."""
+        a = self.atten
+        ll, lr, rr, rl = a[0] / 255.0, a[1] / 255.0, a[2] / 255.0, a[3] / 255.0
+        out_l = np.clip(left * ll + right * rl, -32768, 32767)
+        out_r = np.clip(left * lr + right * rr, -32768, 32767)
+        return out_l, out_r
 
     def play_audio_sector(self, coding, data):
         if ((coding & CODING_CHAN_MASK) > CODING_STEREO or (coding & CODING_BPS_MASK) == CODING_BPS_MPEG
@@ -547,37 +569,37 @@ class CDIC(Device):
         stereo = bool(coding & CODING_STEREO)
         half_rate = (coding & CODING_RATE_MASK) == CODING_18KHZ
         eight = bps == CODING_8BPS
+        groups = np.frombuffer(data[:18 * 128].ljust(18 * 128, b'\0'), dtype=np.uint8).reshape(18, 128)
+        # sample bytes of every group as (group, sample 0..27, column 0..3)
+        body = groups[:, 16:].reshape(18, 28, 4).astype(np.int32)
+        if eight:
+            params = groups[:, 4:8].astype(np.int32)                       # (18, 4)
+            raw = body.transpose(0, 2, 1) << 8                              # (18, 4, 28)
+        else:
+            params = groups[:, [4, 5, 6, 7, 12, 13, 14, 15]].astype(np.int32)  # (18, 8)
+            cols = body.transpose(0, 2, 1)[:, [0, 0, 1, 1, 2, 2, 3, 3]]       # (18, 8, 28)
+            shifts = np.array([0, 4, 0, 4, 0, 4, 0, 4], dtype=np.int32)[None, :, None]
+            raw = ((cols >> shifts) & 15) << 12
+        ranges = np.minimum(params & 0xf, 12)
+        units = (((raw ^ 0x8000) - 0x8000) >> ranges[:, :, None]).tolist()
+        filters = ((params >> 4) & 3).tolist()
         chans = [[], []]
         last = self.xa_last
         for g in range(18):
-            grp = data[g * 128:(g + 1) * 128]
-            units = 4 if eight else 8
-            for i in range(units):
-                if eight:
-                    param = grp[4 + i]
-                    raw = grp[16 + i::4]
-                    samples = [((b << 8) ^ 0x8000) - 0x8000 for b in raw]
-                else:
-                    param = grp[(4, 5, 6, 7, 12, 13, 14, 15)[i]]
-                    raw = grp[16 + (i >> 1)::4]
-                    if i & 1:
-                        samples = [(((b >> 4) << 12) ^ 0x8000) - 0x8000 for b in raw]
-                    else:
-                        samples = [(((b & 15) << 12) ^ 0x8000) - 0x8000 for b in raw]
+            for i, samples in enumerate(units[g]):
                 ch = (i & 1) if stereo else 0
-                f0, f1 = XA_FILTER[(param >> 4) & 3]
-                rng = min(param & 0xf, 12)
+                f0, f1 = XA_FILTER[filters[g][i]]
                 s0, s1 = last[ch * 2], last[ch * 2 + 1]
-                out = chans[ch]
+                append = chans[ch].append
                 for smp in samples:
-                    v = (smp >> rng) + ((f0 * s0 + f1 * s1 + 128) >> 8)
+                    v = smp + ((f0 * s0 + f1 * s1 + 128) >> 8)
                     if v > 32767:
                         v = 32767
                     elif v < -32768:
                         v = -32768
                     s1 = s0
                     s0 = v
-                    out.append(v)
+                    append(v)
                 last[ch * 2], last[ch * 2 + 1] = s0, s1
         left = np.array(chans[0], dtype=np.float32)
         right = np.array(chans[1], dtype=np.float32) if stereo else left
@@ -586,19 +608,17 @@ class CDIC(Device):
             outs = []
             for ci, arr in enumerate((left, right) if stereo else (left,)):
                 x1, y1 = self.deemph_x1[ci], self.deemph_y1[ci]
-                res = np.empty_like(arr)
-                for k, x in enumerate(arr):
+                res = []
+                append = res.append
+                for x in arr.tolist():
                     y = g * (x - z * x1) + p * y1
                     x1, y1 = x, y
-                    res[k] = y
+                    append(y)
                 self.deemph_x1[ci], self.deemph_y1[ci] = x1, y1
-                outs.append(np.clip(res, -32768, 32767))
+                outs.append(np.clip(np.array(res, dtype=np.float32), -32768, 32767))
             left = outs[0]
             right = outs[1] if stereo else left
-        a = self.atten
-        ll, lr, rr, rl = a[0] / 255.0, a[1] / 255.0, a[2] / 255.0, a[3] / 255.0
-        out_l = np.clip(left * ll + right * rl, -32768, 32767)
-        out_r = np.clip(left * lr + right * rr, -32768, 32767)
+        out_l, out_r = self.attenuate(left, right)
         if half_rate:
             out_l = _upsample2(out_l)
             out_r = _upsample2(out_r)

@@ -6,7 +6,10 @@ MMU registers are stored but no translation is performed, and the DMA
 controller only holds the registers the CDIC uses for its transfers.
 """
 
+from . import debuglog
 from .bus import Device
+
+dlog = debuglog.get('scc68070')
 
 # UART status bits
 USR_RB, USR_FE, USR_PE, USR_OE, USR_TXEMT, USR_TXRDY, USR_RXRDY = 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x01
@@ -331,11 +334,15 @@ class SCC68070(Device):
                 if mask & 0xff00:
                     self.tsr &= ~(v >> 8)
             elif o == 2:
+                # the reload value is only used at the next overflow; the
+                # running count is left alone
                 self.reload = comb(self.reload)
-                self.set_timer()
+                dlog.debug('timer0 reload=%04x (count %04x keeps running)', self.reload, self.timer0_value())
             elif o == 4:
-                self.timer0 = comb(self.timer0)
+                # merge byte writes with the live count, not the stale start value
+                self.timer0 = comb(self.timer0_value())
                 self.set_timer()
+                dlog.debug('timer0 count set to %04x', self.timer0)
             elif o == 6:
                 self.timer1 = comb(self.timer1)
             elif o == 8:

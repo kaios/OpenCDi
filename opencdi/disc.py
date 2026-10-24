@@ -10,7 +10,12 @@ import re
 import shlex
 from pathlib import Path
 
+from . import debuglog
+
+dlog = debuglog.get('disc')
+
 SYNC = b'\x00' + b'\xff' * 10 + b'\x00'
+SYNC_SWAPPED = bytes([0xff, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0xff])
 RAW = 2352
 
 
@@ -60,7 +65,28 @@ class Disc:
             raise ValueError(f'no tracks found in {path}')
         last = self.tracks[-1]
         self.total_sectors = last.start + last.length
-        self.byteswapped = False
+        self.byteswapped = self._detect_byteswap()
+        if self.byteswapped:
+            dlog.info('%s: byte swapped raw image; every 2352-byte sector (audio too) is swapped back on read',
+                      self.path)
+
+    def _detect_byteswap(self):
+        """A raw data track whose first sector has a byte swapped sync pattern
+        means the whole image was dumped byte swapped (audio tracks included)."""
+        for t in self.tracks:
+            if t.kind == 'audio' or t.sector_size != RAW:
+                continue
+            try:
+                with open(t.path, 'rb') as f:
+                    f.seek(t.offset)
+                    head = f.read(12)
+            except OSError:
+                continue
+            if head == SYNC_SWAPPED:
+                return True
+            if head == SYNC:
+                return False
+        return False
 
     # ----- loading -------------------------------------------------------------
     @staticmethod
@@ -70,7 +96,7 @@ class Disc:
             head = f.read(RAW * 17)
         if head[:12] == SYNC:
             return RAW
-        if head[:12] == bytes([0xff, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0xff]):
+        if head[:12] == SYNC_SWAPPED:
             return RAW  # byte swapped raw image, handled at read time
         # CD-i disc label lives in sector 16; check where it appears
         for ss in (2048, 2336, 2352):
@@ -91,7 +117,7 @@ class Disc:
             with open(path, 'rb') as f:
                 f.seek(16 * RAW)
                 hdr = f.read(16)
-            if hdr[:12] == SYNC and hdr[15] == 1:
+            if (hdr[:12] == SYNC and hdr[15] == 1) or (hdr[:12] == SYNC_SWAPPED and hdr[14] == 1):
                 kind = 'mode1'
         return Track(1, kind, path, 0, ss, 0, length)
 
@@ -184,6 +210,10 @@ class Disc:
             data = data.ljust(t.sector_size, b'\x00')
         ss = t.sector_size
         if ss == RAW:
+            if self.byteswapped:
+                b = bytearray(data)
+                b[0::2], b[1::2] = data[1::2], data[0::2]
+                return bytes(b)
             return data
         m, s, fr = msf(lba)
         if ss == 2336:      # mode 2, no sync/header

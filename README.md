@@ -66,8 +66,13 @@ python -m opencdi game.cue        # opens the launcher with this disc already se
 ```
 
 Options: `--bios PATH` (start immediately), `--ntsc`, `--scale N`, `--fullscreen`,
-`--no-audio`, `--serial` (print the 68070 serial console),
-`--headless FRAMES --screenshot out.png` (run without a window; needs `--bios`).
+`--no-audio`, `--serial` (print the 68070 serial console; lines typed on stdin are sent to it),
+`--debug` (detailed debug log), `--headless FRAMES --screenshot out.png` (run without a window;
+needs `--bios`).
+
+A debug log is written to `~/.opencdi/debug.log` on every run. Emulator faults are always
+logged there; `--debug` adds per-event detail. What each message means, and every change
+made in each release, is described in `docs/debug/`.
 
 Disc images: `.cue/.bin` (MODE1/2352, MODE2/2352, MODE2/2336, AUDIO; multi-track and
 multi-file), `.iso`/`.bin`/`.img` single files.  Raw 2352-byte sectors are best because they
@@ -99,6 +104,7 @@ Verified: the player shell boots and is fully usable (menus, settings, info), au
 recognised and play, and CD-i discs are recognised and their application loads and runs
 (tested with the LGPL homebrew *CD-i Stub*).  The CPU core passes the SingleStepTests
 68000 suite (`tools/run_sst.py`) apart from address-error cases it skips.
+`tools/check_fixes.py` runs regression checks for the 0.1.1 fixes without a BIOS.
 
 Speed: everything is pure Python plus numpy.  The CPU core is generated per opcode at
 start-up, and pixels are produced once per frame with numpy.  On a typical desktop the

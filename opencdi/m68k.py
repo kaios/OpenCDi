@@ -860,7 +860,7 @@ def gen_alu(op):
     mask = SIZE[size][1]
     s = Src()
     s.g('ccr')
-    if opm < 4 or name == 'eor' and False:
+    if opm < 4:
         # <ea> op Dn -> Dn
         allowed = ALL if name in ('add', 'sub', 'cmp') else DATA
         src = ea_operand(mode, reg, size, 'X', 's', allowed)
@@ -1144,7 +1144,8 @@ def ix(base, e):
 
 
 def set_sr(v):
-    """Write SR; returns True when an interrupt became serviceable."""
+    """Write SR; returns True when the run loop must look at the new state
+    (an interrupt became serviceable or the trace bit is set)."""
     global srh, ccr, usp, ssp
     v &= 0xa71f
     if (v ^ srh) & 0x2000:
@@ -1154,7 +1155,7 @@ def set_sr(v):
             ssp = R[15]; R[15] = usp
     srh = v & 0xff00
     ccr = v & 0x1f
-    return irq_pending()
+    return irq_pending() or bool(v & 0x8000)
 
 
 def irq_pending():
@@ -1412,6 +1413,25 @@ def run(budget):
     ppc = pc
     while left > 0:
         try:
+            if srh & 0x8000 and TRACE:
+                # trace mode: one instruction, then a trace exception (vector 9)
+                ppc = pc
+                if pc & 1:
+                    raise AddressError(pc)
+                p = FP[pc >> 16]
+                o = pc & 0xffff
+                op = p[o] << 8 | p[o + 1]
+                try:
+                    pc = OPS[op](pc + 2)
+                except CpuBreak:
+                    pc = PC
+                left -= CYC[op]
+                stopped = False
+                pc = exception(9, pc)
+                log_trace(ppc, op)
+                if irq_pending():
+                    pc = take_interrupt(pc)
+                continue
             while left > 0:
                 ppc = pc
                 if pc & 1:
@@ -1422,7 +1442,11 @@ def run(budget):
                 pc = OPS[op](pc + 2)
                 left -= CYC[op]
         except CpuBreak:
+            # the instruction completed (it wrote SR or executed STOP): count it
+            left -= CYC[op]
             pc = PC
+            if srh & 0x8000 and TRACE:
+                continue
             if irq_pending():
                 pc = take_interrupt(pc)
             elif stopped:
@@ -1431,9 +1455,10 @@ def run(budget):
             pc = bus_error(e, ppc, op)
             if halted:
                 break
-        except IndexError:
-            # misaligned word access running off the end of a page
-            log_fault(ppc, op)
+        except IndexError as e:
+            # a page index past the 32-bit space; device code raising
+            # IndexError also ends up here, so the fault is always logged
+            log_fault(ppc, op, e)
             pc = bus_error(BusError(pc, False), ppc, op)
             if halted:
                 break
@@ -1452,11 +1477,12 @@ class M68070:
         ns = {
             'R': [0] * 16, 'ccr': 0, 'srh': 0x2700, 'usp': 0, 'ssp': 0,
             'PC': 0, 'vbr': 0, 'xc': 0, 'ipl': 0, 'nmi_edge': False,
-            'stopped': False, 'halted': False, 'FRAME_FORMAT': True,
+            'stopped': False, 'halted': False, 'FRAME_FORMAT': True, 'TRACE': True,
             'CpuBreak': CpuBreak, 'BusError': BusError, 'AddressError': AddressError,
             'iack': lambda level: 24 + level,
             'reset_devices': lambda: None,
-            'log_fault': lambda pc, op: None,
+            'log_fault': lambda pc, op, exc: None,
+            'log_trace': lambda pc, op: None,
         }
         ns.update(bus.cpu_functions())
         exec(compile(RUNTIME, '<m68k-runtime>', 'exec'), ns)

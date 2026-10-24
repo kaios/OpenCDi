@@ -3,8 +3,10 @@
 
 Usage: run_sst.py DIR_WITH_JSON_BIN [NAME ...]
 
-The core is switched to plain 68000 exception frames for the run.  Tests that
-raise address errors are skipped because the core does not model them.
+The core is switched to plain 68000 exception frames for the run, and trace
+exceptions are turned off because the tests record the state right after the
+instruction (before a trace exception would be taken).  Tests that raise
+address errors are skipped because the core does not model them.
 """
 import sys
 from pathlib import Path
@@ -81,6 +83,7 @@ def main():
     cpu = M68070(bus)
     ns = cpu.ns
     ns['FRAME_FORMAT'] = False
+    ns['TRACE'] = False
     ns['reset_devices'] = lambda: None
     total_fail = 0
     for f in files:
@@ -131,7 +134,9 @@ def main():
                 got['ssp'], got['usp'] = R[15], ns['usp']
             else:
                 got['usp'], got['ssp'] = R[15], ns['ssp']
-            got['pc'] = ((ns['PC'] or 0) + 4) & 0xffffffff
+            # the reported pc includes the two prefetched words; a CPU stopped
+            # by STOP has not prefetched past the next instruction
+            got['pc'] = ((ns['PC'] or 0) + (0 if ns['stopped'] else 4)) & 0xffffffff
             if ns['PC'] is None:
                 diffs_extra = ['handler returned None']
             else:

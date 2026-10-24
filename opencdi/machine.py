@@ -9,12 +9,14 @@ Memory map (from MAME's cdi.cpp):
 Unmapped addresses raise a bus error, which the ROM uses to size memory.
 """
 
+import traceback
 import zlib
 from pathlib import Path
 
 import numpy as np
 
 from .bus import Bus, Device
+from . import debuglog
 from .cdic import CDIC
 from .m68k import M68070
 from .mcd212 import MCD212
@@ -22,6 +24,8 @@ from .nvram import MK48T08
 from .scc68070 import SCC68070
 from .sched import Scheduler
 from .slave import Slave
+
+dlog = debuglog.get('machine')
 
 CPU_CLOCK_PAL = 15_000_000        # 30 MHz crystal / 2
 CPU_CLOCK_NTSC = 15_104_900       # 30.2098 MHz / 2
@@ -98,6 +102,7 @@ class Machine:
         self.frame = None
         self.frames = 0
         self._reset_pending = False
+        self.serial_input = None   # queue of bytes for the UART, set by the frontend
 
         bus = self.bus = Bus()
         self.plane_a = bus.map_ram('planeA', 0x000000, 0x80000)
@@ -126,7 +131,9 @@ class Machine:
         ns = self.cpu.ns
         ns['iack'] = self.scc.iack
         ns['reset_devices'] = self.reset_peripherals
-        ns['log_fault'] = lambda pc, op: None
+        ns['log_fault'] = self._log_fault
+        ns['log_trace'] = self._log_trace
+        self._faults = 0
         self.reset()
 
     # ----- reset ---------------------------------------------------------------
@@ -136,6 +143,19 @@ class Machine:
         self.slave.reset()
         self.video.reset()
 
+    def _log_fault(self, pc, op, exc):
+        # an IndexError inside the CPU loop is turned into a guest bus error;
+        # record where it came from so emulator bugs are not hidden
+        self._faults += 1
+        if self._faults <= 50:
+            tb = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            dlog.warning('IndexError at pc=%08x op=%04x turned into a bus error\n%s', pc, op, tb)
+        elif self._faults == 51:
+            dlog.warning('more IndexError faults; no longer logging them')
+
+    def _log_trace(self, pc, op):
+        dlog.debug('trace exception after pc=%08x op=%04x', pc, op)
+
     def reset(self):
         self.sched.clear()
         self.sched.now = 0
@@ -144,6 +164,8 @@ class Machine:
         self.plane_a[0][0:8] = self.rom[0:8]
         self.scc.cpu = None
         self.reset_peripherals()
+        # full system reset only: the RESET instruction does not reset the mute state
+        self.cdic.muted = False
         self.scc.cpu = self.cpu
         self.scc.update_ipl()
         self.cpu.reset()
@@ -203,6 +225,11 @@ class Machine:
         if self._reset_pending:
             self._reset_pending = False
             self.reset()
+        q = self.serial_input
+        if q is not None and not q.empty():
+            data = q.get_nowait()
+            dlog.debug('serial input %r', data)
+            self.scc.uart_feed(data)
         video = self.video
         start_frames = self.frames
         guard = 0
@@ -223,3 +250,10 @@ class Machine:
 
     def save(self):
         self.nvram.save()
+
+    def close(self):
+        """Save NVRAM and release the disc image files."""
+        self.save()
+        if self.disc is not None:
+            self.disc.close()
+            dlog.debug('closed disc image %s', self.disc.path)
