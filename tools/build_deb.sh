@@ -73,7 +73,7 @@ cat > "$D/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e
 if command -v py3compile >/dev/null 2>&1; then
-    py3compile -p opencdi
+    py3compile -p opencdi || true
 fi
 if [ "$1" = configure ] && command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database -q /usr/share/applications || true
