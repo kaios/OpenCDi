@@ -94,6 +94,8 @@ def sector_count_for_coding(coding):
 
 
 class CDIC(Device):
+    STATE_SKIP = frozenset({'m'})     # not in save states (savestate.py)
+
     def __init__(self, machine):
         self.m = machine
         self.ram = bytearray(0x4000)

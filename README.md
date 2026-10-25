@@ -11,6 +11,7 @@ It emulates the CD-i **Mono-I** board (Philips CD-i 220 F2 / Magnavox CD-i 200):
 | CD drive | CDIC: Mode 1/Mode 2 sector reads, TOC, CD-DA playback, CD-ROM XA ADPCM audio (4/8-bit, 37.8/18.9 kHz, mono/stereo) | `cdic.py` |
 | Input/system | SLAVE controller (pointer device, audio attenuation, front panel) | `slave.py` |
 | NVRAM | MK48T08 timekeeper (saved between runs) | `nvram.py` |
+| Save states | the whole machine, in nine slots per disc | `savestate.py` |
 
 ## Architecture
 
@@ -38,6 +39,11 @@ It emulates the CD-i **Mono-I** board (Philips CD-i 220 F2 / Magnavox CD-i 200):
 * **Disc images** (`disc.py`): `.cue`/`.bin` and `.iso` directly; MAME `.chd` through `chd.py`,
   with FLAC and LZMA decoders in C (`native/flac.c`, `native/lzma.c`) and Python fallbacks
   (`flac.py`, Python's `lzma`).
+* **Save states** (`savestate.py`): taken between two frames, when no picture is half
+  built.  A state holds the CPU registers, all RAM and NVRAM, every device's registers and
+  the scheduler's pending events (by device and method name), so a loaded game runs
+  exactly as it would have after the save.  The file is JSON plus raw memory, compressed;
+  nothing in it is executed or unpickled.
 * **Frontend** (`frontend.py`, `launcher.py`, `inputs.py`): pygame window, launcher, input
   and the audio stream (a ~150 ms buffer with seamless resampling, `audio.py`).  On Android
   `touch.py` adds the touch controls and `android_support.py` the storage access.
@@ -106,7 +112,26 @@ This opens the launcher:
 The launcher works with the mouse, the keyboard or a game controller.  Your choices are
 saved in `~/.opencdi/config.json`, so the next start has them selected already.  While a
 game is running, press **Esc**, **F2** or the controller's **Back/Select** button to return
-to the launcher. From there you can resume, change the BIOS or disc and restart, or quit.
+to the launcher. From there you can resume, save or load a state, change the BIOS or disc
+and restart, or quit.
+
+### Save states
+
+A save state stores the whole game, so you can carry on from exactly that point
+later, even in games that cannot save on their own.  Every disc has nine slots.
+
+* **F5** saves to the current slot, **F8** loads it, **F6** / **F7** choose the
+  previous / next slot.  A message at the top left says what happened.
+* In the launcher, **Save state** and **Load state** show the nine slots with the date
+  and a picture of each.  **Load state** also works before a game is started: it starts
+  the selected BIOS and disc and loads the state.  On Android this is the way to
+  save and load (**MENU** button).
+
+States are saved in `~/.opencdi/states/<disc id>/slot1.state` to `slot9.state`.  The
+disc id comes from the disc's contents, so a `.chd` and a `.cue`/`.bin` of the same disc
+share their slots.  A state only loads with the BIOS and disc it was saved with, and a
+damaged or refused file leaves the running game as it was.  A state includes the NVRAM,
+so loading one also puts back the NVRAM (the games' own saves) of that moment.
 
 To skip the launcher, pass the BIOS on the command line:
 
@@ -119,7 +144,8 @@ Options: `--bios PATH` (start immediately), `--ntsc` / `--pal` (60 or 50 Hz play
 `--scale N` (window size as a multiple of the picture), `--fullscreen`,
 `--no-audio`, `--serial` (print the 68070 serial console; lines typed on stdin are sent to it),
 `--debug` (detailed debug log), `--headless FRAMES --screenshot out.png` (run without a window;
-needs `--bios`).
+needs `--bios`), and with `--headless`: `--load-state FILE` (start from a save state) and
+`--save-state FILE` (save one at the end).
 
 A debug log is written to `~/.opencdi/debug.log` on every run. Emulator faults are always
 logged there; `--debug` adds per-event detail. What each message means, and every change
@@ -148,8 +174,9 @@ Controllers are hot-pluggable. Pads in SDL's controller database (Xbox, PlayStat
 Switch, 8BitDo, most USB pads) use the standard layout; anything else falls back to raw
 axes, hat and buttons 0-3.
 
-Hotkeys: Esc/F2 launcher menu, F1 help, F3 reset, F10 release mouse, F11 fullscreen,
-F12 screenshot, P pause, hold Tab to fast-forward.
+Hotkeys: Esc/F2 launcher menu, F1 help, F3 reset, F5 save state, F8 load state,
+F6/F7 previous/next save state slot, F10 release mouse, F11 fullscreen, F12 screenshot,
+P pause, hold Tab to fast-forward.
 
 ## Status and performance
 

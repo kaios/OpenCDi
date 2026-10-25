@@ -75,6 +75,8 @@ def main(argv=None):
     ap.add_argument('--debug', action='store_true', help='write detailed messages to ~/.opencdi/debug.log')
     ap.add_argument('--headless', type=int, metavar='FRAMES', help='run FRAMES frames without a window (needs --bios)')
     ap.add_argument('--screenshot', help='with --headless: save the last frame to this PNG')
+    ap.add_argument('--load-state', metavar='FILE', help='with --headless: start from this save state (a slotN.state file)')
+    ap.add_argument('--save-state', metavar='FILE', help='with --headless: save the state at the end to FILE')
     args = ap.parse_args(argv)
 
     from . import debuglog
@@ -101,6 +103,14 @@ def main(argv=None):
             sys.exit(f'--headless needs --bios PATH (download a BIOS from {BIOS_URL})')
         m = build_machine(args.bios, args.disc, not args.pal, log, serial_input)
         m.audio_enabled = False
+        if args.load_state:
+            from .savestate import StateError, load
+            try:
+                load(m, args.load_state)
+            except StateError as e:
+                m.close()
+                sys.exit(f'{args.load_state}: {e}')
+            print(f'loaded {args.load_state}')
         t0 = time.time()
         for _ in range(args.headless):
             m.run_frame()
@@ -111,6 +121,10 @@ def main(argv=None):
             from .frontend import save_png
             save_png(m.frame, args.screenshot)
             print(f'saved {args.screenshot}')
+        if args.save_state:
+            from .savestate import save
+            save(m, args.save_state)
+            print(f'saved {args.save_state}')
         m.close()
         return
 
@@ -135,10 +149,21 @@ def main(argv=None):
     try:
         while True:
             if choice is None:
-                choice = Launcher(app, cfg, can_resume=machine is not None, message=message).run()
+                choice = Launcher(app, cfg, can_resume=machine is not None, message=message,
+                                  state_id=emulator.disc_id if emulator is not None else None).run()
                 message = ''
             if choice[0] == 'quit':
                 break
+            if choice[0] == 'save':
+                if not emulator.state_action('save', choice[1]):
+                    message = emulator.osd[0]
+                    choice = None
+                    continue
+                choice = ('resume',)
+            load_slot = None
+            if choice[0] == 'load':
+                _, load_slot, bios, disc, ntsc, into_running = choice
+                choice = ('resume',) if into_running else ('start', bios, disc, ntsc)
             if choice[0] == 'start':
                 _, bios, disc, ntsc = choice
                 if machine is not None:
@@ -155,6 +180,14 @@ def main(argv=None):
                     continue
                 title = 'OpenCDi' + (f' - {Path(disc).name}' if disc else '')
                 emulator = Emulator(app, machine, title)
+            if load_slot is not None and emulator is not None:
+                if not emulator.state_action('load', load_slot):
+                    message = emulator.osd[0]
+                    if choice[0] == 'start':      # nothing was running: do not start a game that was not asked for
+                        machine.close()
+                        machine = emulator = None
+                    choice = None
+                    continue
             if choice[0] in ('start', 'resume') and emulator is not None:
                 if emulator.run() == 'quit':
                     break

@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pygame
 
-from . import android_support, debuglog
+from . import android_support, debuglog, savestate
 from .audio import OUT_RATE, LinearResampler
 from .inputs import InputManager
 
@@ -20,7 +20,8 @@ HELP = """OpenCDi controls
   Button 2     X / K, controller B, right mouse button
   Both         C / L, controller Start, middle mouse button
   Fast pointer Shift, controller shoulder buttons
-  Esc / F2 / controller Back: menu (BIOS, disc, quit)
+  Esc / F2 / controller Back: menu (BIOS, disc, save states, quit)
+  F5 save state   F8 load state   F6 / F7 previous / next slot (1-9)
   F1 help   F3 reset   F10 release mouse   F11 fullscreen   F12 screenshot
   P pause   Tab (hold) fast forward"""
 
@@ -297,6 +298,7 @@ class Emulator:
     SYNC_GAIN = 0.5           # frame length change per relative error of the average level
     SYNC_RANGE = 0.10         # at most 10 % longer or shorter frames
     SYNC_QUIET = 20           # frames after the last audio during which the sync still applies
+    OSD_TIME = 2.5            # seconds a message stays on the picture
 
     def __init__(self, app, machine, title='OpenCDi'):
         self.app = app
@@ -316,6 +318,12 @@ class Emulator:
         self._error = None
         self.frames = 0          # emulated frames this session
         self.skipped = 0         # of those, pictures not drawn (host too slow)
+        # save states: the slot F5/F8 use, and a request for the emulation thread
+        self.slot = 1
+        self.disc_id = savestate.disc_id(machine.disc)     # now, before the emulation thread reads the disc
+        self._state_request = None   # ('save' | 'load', slot)
+        self.osd = None              # (message, time it disappears)
+        self._osd_font = None
 
     def draw(self, frame):
         if frame is None:
@@ -346,7 +354,62 @@ class Emulator:
             scaled = self.surf if (tw, th) == (w, h) else pygame.transform.scale(self.surf, (tw, th))
             window.fill((0, 0, 0))
             window.blit(scaled, ((ww - tw) // 2, (wh - th) // 2))
+        self.draw_osd(window)
         pygame.display.flip()
+
+    def draw_osd(self, window):
+        osd = self.osd
+        if osd is None or time.monotonic() >= osd[1]:
+            return
+        if self._osd_font is None:
+            self._osd_font = pygame.font.Font(None, 28)
+        img = self._osd_font.render(osd[0], True, (240, 240, 240))
+        box = pygame.Rect(12, 12, img.get_width() + 20, img.get_height() + 12)
+        window.fill((20, 20, 30), box)
+        window.blit(img, (22, 18))
+
+    def notify(self, text):
+        """Show a short message over the picture (and print it)."""
+        print(text)
+        dlog.info('%s', text)
+        self.osd = (text, time.monotonic() + self.OSD_TIME)
+        with self._cond:
+            self._cond.notify_all()
+
+    # ----- save states ---------------------------------------------------------------
+    def slot_text(self, slot):
+        info = savestate.read_meta(savestate.slot_path(self.disc_id, slot))
+        return f'Slot {slot}: ' + (savestate.describe(info[0]) if info else 'empty')
+
+    def state_action(self, action, slot):
+        """Save to or load from a slot.  Only between frames: from the
+        emulation thread, or while it is not running (the launcher).
+        Returns True when it worked; the outcome is shown with notify()."""
+        m = self.m
+        path = savestate.slot_path(self.disc_id, slot)
+        ok = False
+        try:
+            if action == 'save':
+                savestate.save(m, path)
+                msg = f'State saved to slot {slot}'
+            elif not path.exists():
+                msg = f'Slot {slot} is empty'
+            else:
+                savestate.load(m, path)
+                if self.app.audio:
+                    self.app.audio.stop()       # the old position's sound
+                with self._cond:
+                    self._frame = m.frame
+                    self._seq += 1
+                msg = f'State loaded from slot {slot}'
+            ok = msg.startswith('State')
+        except savestate.StateError as e:
+            msg = f'Slot {slot}: {e}'
+        except OSError as e:
+            msg = f'Could not save slot {slot}: {e.strerror or e}'
+        self.slot = slot
+        self.notify(msg)
+        return ok
 
     def screenshot(self):
         if self.m.frame is None:
@@ -377,6 +440,10 @@ class Emulator:
         skipped_in_row = 0
         avg_fill = app.audio.TARGET if app.audio else 0
         while not self._stop:
+            req, self._state_request = self._state_request, None
+            if req is not None:
+                self.state_action(*req)
+                next_t = time.perf_counter()     # a slow save must not cause a burst of frames
             if self.paused:
                 if app.audio and app.audio.primed:
                     app.audio.stop()
@@ -460,6 +527,7 @@ class Emulator:
         shown_seq = self._seq
         last_drawn = None
         redraw = True
+        osd_shown = None
         sent = unchanged = missed = 0       # this session: pictures sent, identical ones not sent, never seen
         send_time = 0.0
         stats_t = time.perf_counter()
@@ -498,6 +566,13 @@ class Emulator:
                             self.screenshot()
                         elif k == pygame.K_p:
                             self.paused = not self.paused
+                        elif k == pygame.K_F5:
+                            self._state_request = ('save', self.slot)
+                        elif k == pygame.K_F8:
+                            self._state_request = ('load', self.slot)
+                        elif k in (pygame.K_F6, pygame.K_F7):
+                            self.slot = (self.slot - 1 + (1 if k == pygame.K_F7 else -1)) % savestate.SLOTS + 1
+                            self.notify(self.slot_text(self.slot))
                         elif k == pygame.K_F1:
                             print(HELP)
                 menu_btn = inp.pad_state()[4]
@@ -512,6 +587,10 @@ class Emulator:
                             redraw = True        # a touch button was pressed or released
                 if result is not None:
                     break
+                osd = self.osd if self.osd is not None and time.monotonic() < self.osd[1] else None
+                if osd != osd_shown:
+                    osd_shown = osd          # a message appeared, changed or went away
+                    redraw = True
                 with self._cond:
                     if self._seq == shown_seq and not redraw and not self._done:
                         self._cond.wait(timeout=0.05)     # also keeps the window responsive while paused

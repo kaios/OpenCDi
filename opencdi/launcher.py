@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pygame
 
-from . import android_support
+from . import android_support, savestate
 from .frontend import BASE_SIZE
 from .machine import check_bios
 
@@ -341,6 +341,140 @@ class FileBrowser:
         sc.present()
 
 
+class SlotScreen:
+    """Pick a save state slot (1-9), with the picture of the highlighted one."""
+
+    ROW_Y, ROW_H = 82, 40
+
+    def __init__(self, screen, nav, title, slots, saving):
+        self.screen = screen
+        self.nav = nav
+        self.title = title
+        self.slots = slots            # from savestate.list_slots()
+        self.saving = saving
+        self.sel = 0
+        self.note = ''
+        self.thumbs = {}
+        # start on the newest state when loading, on the first empty slot when saving
+        used = [i for i, sl in enumerate(slots) if sl[2]]
+        if saving:
+            free = [i for i, sl in enumerate(slots) if not sl[2]]
+            self.sel = free[0] if free else 0
+        elif used:
+            self.sel = max(used, key=lambda i: slots[i][2].get('time', 0))
+
+    def row_rect(self, i):
+        return pygame.Rect(20, self.ROW_Y + i * self.ROW_H, 330, self.ROW_H - 6)
+
+    def activate(self):
+        slot, _path, meta, _thumb = self.slots[self.sel]
+        if not self.saving and not meta:
+            self.note = f'Slot {slot} is empty.'
+            return None
+        return slot
+
+    def run(self):
+        """Returns the chosen slot number or None."""
+        clock = pygame.time.Clock()
+        n = len(self.slots)
+        while True:
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT:
+                    pygame.event.post(pygame.event.Event(pygame.QUIT))
+                    return None
+                if ev.type in (pygame.JOYDEVICEADDED, pygame.JOYDEVICEREMOVED):
+                    self.screen.app.input.rescan()
+                elif ev.type == pygame.KEYDOWN:
+                    a = NavInput.key_action(ev)
+                    if a in ('back', 'up_dir'):
+                        return None
+                    if a == 'fullscreen':
+                        self.screen.app.toggle_fullscreen()
+                    elif a in ('up', 'down'):
+                        self.sel = (self.sel + (-1 if a == 'up' else 1)) % n
+                        self.note = ''
+                    elif a in ('select', 'right'):
+                        r = self.activate()
+                        if r is not None:
+                            return r
+                    elif pygame.K_1 <= ev.key <= pygame.K_9 and ev.key - pygame.K_1 < n:
+                        self.sel = ev.key - pygame.K_1
+                        self.note = ''
+                elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                    pos = self.screen.to_canvas(ev.pos)
+                    for i in range(n):
+                        if self.row_rect(i).collidepoint(pos):
+                            # a click selects, a click on the selected slot chooses it
+                            if i == self.sel:
+                                r = self.activate()
+                                if r is not None:
+                                    return r
+                            else:
+                                self.sel = i
+                                self.note = ''
+                    if pygame.Rect(600, 500, 148, 30).collidepoint(pos):
+                        return None
+                elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 3:
+                    return None
+            for a in self.nav.poll_pad():
+                if a in ('up', 'down'):
+                    self.sel = (self.sel + (-1 if a == 'up' else 1)) % n
+                    self.note = ''
+                elif a in ('select', 'right'):
+                    r = self.activate()
+                    if r is not None:
+                        return r
+                elif a in ('back', 'left'):
+                    return None
+            self.draw()
+            clock.tick(30)
+
+    def thumb(self, i):
+        if i not in self.thumbs:
+            img = None
+            t = self.slots[i][3]
+            if t is not None:
+                w, h, rgb = t
+                img = pygame.transform.smoothscale(pygame.image.frombuffer(rgb, (w, h), 'RGB'), (384, 240))
+            self.thumbs[i] = img
+        return self.thumbs[i]
+
+    def draw(self):
+        sc = self.screen
+        c = sc.canvas
+        c.fill(BG)
+        sc.text(self.title, (20, 14), TEXT, sc.big)
+        for i, (slot, _path, meta, _t) in enumerate(self.slots):
+            r = self.row_rect(i)
+            pygame.draw.rect(c, HILITE if i == self.sel else PANEL, r, border_radius=6)
+            sc.text(f'{slot}', (r.x + 12, r.y + 9), TEXT)
+            sc.text(savestate.describe(meta), (r.x + 44, r.y + 9), TEXT if meta else DIM, maxw=r.w - 56)
+        box = pygame.Rect(364, self.ROW_Y, 384, 240)
+        pygame.draw.rect(c, PANEL, box)
+        img = self.thumb(self.sel)
+        slot, _path, meta, _t = self.slots[self.sel]
+        if img is not None:
+            c.blit(img, box)
+        else:
+            sc.text('empty' if not meta else 'no picture', (box.x + 150, box.y + 110), DIM)
+        y = box.bottom + 14
+        if meta:
+            ntsc = 'NTSC' if meta.get('ntsc') else 'PAL'
+            sc.text(meta.get('disc') or 'no disc', (364, y), TEXT, sc.small, maxw=384)
+            sc.text(f'{meta.get("rom_name", "")}, {ntsc}', (364, y + 22), DIM, sc.small, maxw=384)
+            sc.text(f'saved by OpenCDi {meta.get("version", "?")}', (364, y + 44), DIM, sc.small, maxw=384)
+            if self.saving:
+                sc.text('Saving here replaces this state.', (364, y + 70), WARN, sc.small, maxw=384)
+        if self.note:
+            sc.text(self.note, (20, 470), BAD, sc.small, maxw=560)
+        action = 'save' if self.saving else 'load'
+        sc.text(f'Enter/A or click the highlighted slot: {action}   1-9: slot   Esc/B: cancel',
+                (20, 530), DIM, sc.small)
+        pygame.draw.rect(c, PANEL, (600, 500, 148, 30), border_radius=6)
+        sc.text('Cancel', (645, 506), TEXT, sc.small)
+        sc.present()
+
+
 def human(n):
     for unit in ('B', 'KB', 'MB', 'GB'):
         if n < 1024 or unit == 'GB':
@@ -353,13 +487,16 @@ class Launcher:
     """Main menu.  run() returns one of:
         ('start', bios_path, disc_path_or_None, ntsc)
         ('resume',)
+        ('save', slot)                    save the running game's state
+        ('load', slot, bios_path, disc_path_or_None, ntsc, into_running)
         ('quit',)
     """
 
-    def __init__(self, app, cfg, can_resume=False, message=''):
+    def __init__(self, app, cfg, can_resume=False, message='', state_id=None):
         self.app = app
         self.cfg = cfg
         self.can_resume = can_resume
+        self.state_id = state_id      # savestate.disc_id() of the running game's disc
         self.message = message
         self.screen = Screen(app)
         self.nav = NavInput(app.input)
@@ -383,6 +520,10 @@ class Launcher:
         if self.resumable():
             items.append(('resume', 'Resume'))
         items.append(('start', 'Restart' if self.resumable() else 'Start'))
+        if self.resumable():
+            items.append(('save', 'Save state'))
+        if self.bios_ok():
+            items.append(('load', 'Load state'))
         bios = self.cfg.get('bios')
         items.append(('bios', 'BIOS:  ' + (Path(bios).name if bios else '(none selected)')))
         disc = self.cfg.get('disc')
@@ -404,6 +545,8 @@ class Launcher:
         cfg = self.cfg
         if key == 'resume':
             return ('resume',)
+        if key in ('save', 'load'):
+            return self.choose_slot(key)
         if key == 'start':
             if not self.bios_ok():
                 self.message = 'Select a working CD-i BIOS first.'
@@ -445,8 +588,30 @@ class Launcher:
             return ('quit',)
         return None
 
+    def choose_slot(self, key):
+        cfg = self.cfg
+        running = self.resumable()
+        did = self.state_id if running else None
+        if did is None:
+            try:
+                did = savestate.disc_id_for_path(cfg.get('disc'))
+            except Exception as e:  # noqa: BLE001 - the disc cannot be opened
+                self.message = f'Cannot open the disc: {e}'
+                return None
+        saving = key == 'save'
+        slot = SlotScreen(self.screen, self.nav, 'Save state' if saving else 'Load state',
+                          savestate.list_slots(did), saving).run()
+        if slot is None:
+            return None
+        if saving:
+            return ('save', slot)
+        save_config(cfg)
+        return ('load', slot, cfg['bios'], cfg.get('disc'), use_ntsc(cfg), running)
+
     def item_rects(self, items):
-        return [pygame.Rect(184, 150 + i * 44, 400, 36) for i in range(len(items))]
+        # nine items (with save states) need a tighter menu
+        top, step = (150, 44) if len(items) <= 7 else (118, 38)
+        return [pygame.Rect(184, top + i * step, 400, step - 8) for i in range(len(items))]
 
     def run(self):
         clock = pygame.time.Clock()

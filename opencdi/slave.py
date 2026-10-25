@@ -30,6 +30,9 @@ class Channel:
 
 
 class Slave(Device):
+    # not in save states (savestate.py); the pointer input is the live one
+    STATE_SKIP = frozenset({'m', 'input_x', 'input_y', 'input_buttons'})
+
     def __init__(self, machine):
         self.m = machine
         self.int_event = None

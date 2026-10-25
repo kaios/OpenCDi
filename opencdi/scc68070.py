@@ -36,6 +36,8 @@ class DmaChannel:
 
 
 class SCC68070(Device):
+    STATE_SKIP = frozenset({'m', 'cpu', 'iack_callbacks'})     # not in save states (savestate.py)
+
     def __init__(self, machine):
         self.m = machine
         self.cpu = None

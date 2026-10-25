@@ -117,6 +117,12 @@ class PlaneLine:
 
 
 class MCD212(Device):
+    # not in save states (savestate.py): references, statistics, and the
+    # caches, which after_load() empties
+    STATE_SKIP = frozenset({'m', 'pages', 'skip_render', 'render_stats', '_cursor_logged', 'snap', 'lines',
+                            'rle_cache', '_cache_sig', '_cache_used', '_cache_out', '_pl_state', '_dca_cache',
+                            '_clut_np', '_clut_np_ver'})
+
     def __init__(self, machine, plane_a_pages, plane_b_pages):
         self.m = machine
         self.pages = (plane_a_pages, plane_b_pages)
@@ -138,8 +144,6 @@ class MCD212(Device):
         self.dca = [0, 0]
         self.clut = [0] * 256
         self.clut_ver = 0
-        self._clut_np = None
-        self._clut_np_ver = -1
         self.icm = 0
         self.tcr = 0
         self.plane_order = 0
@@ -161,20 +165,30 @@ class MCD212(Device):
         self.blink_time = 0
         self.blink_active = False
         self.int_line = False
+        self.state_ver = 0
+        self.reset_caches()
+        self.update_frame_geometry()
+
+    def reset_caches(self):
+        self._clut_np = None
+        self._clut_np_ver = -1
         self.lines = []
         self.snap = None
         self.rle_cache = [{}, {}]
         # last rendered picture (before the cursor) and what it was made from;
-        # clut_ver/matte_ver restart at 0 here, so the cache must not survive
+        # clut_ver/matte_ver restart at 0 on reset and change on a state load,
+        # so the cache must not survive either
         self._cache_sig = None
         self._cache_used = None     # (address ranges, bytes) from used_plane_bytes()
         self._cache_out = None
         # plane_line()/process_dca() caches: decoder state per plane, valid while
         # state_ver is unchanged, and decoded DCA blocks by address
-        self.state_ver = 0
         self._pl_state = [None, None]
         self._dca_cache = [{}, {}]
-        self.update_frame_geometry()
+
+    def after_load(self):
+        """A save state was loaded (savestate.restore())."""
+        self.reset_caches()
 
     # ----- helpers -----------------------------------------------------------
     def update_frame_geometry(self):

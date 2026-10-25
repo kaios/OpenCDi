@@ -433,6 +433,7 @@ class FakeApp:
     def note_resize(self, size): pass
 class FakeMachine:
     frame = None
+    disc = None
     def __init__(self, fail_at=None, quit_at=None):
         self.n, self.fail_at, self.quit_at, self.saved = 0, fail_at, quit_at, False
         self.video = type('V', (), {'render_stats': [0, 0, 0]})()
@@ -598,6 +599,76 @@ for name, content, expect in (('v4.chd', b'MComprHD' + (124).to_bytes(4, 'big') 
         check(f'CHD error message ({name})', False)
     except ValueError as e:
         check(f'CHD error message ({name})', expect in str(e), str(e))
+
+# ----- 0.1.6: save states ----------------------------------------------------------
+# 17. a loaded state continues exactly as the machine did after saving it: CPU,
+#     RAM, timers, pending events.  The test ROM keeps writing the SCC timer's
+#     count into RAM, so any timing difference shows up in memory.
+from opencdi import savestate
+from opencdi.machine import Machine as _Machine
+rom = bytearray(b'\xff' * 0x80000)
+rom[0:8] = (0x0007fff0).to_bytes(4, 'big') + (0x00400100).to_bytes(4, 'big')
+prog = bytes.fromhex('41f900500000' '323980002024' '30c1' '5280' 'b1fc00560000' '66ee' '60e6')
+rom[0x100:0x100 + len(prog)] = prog
+rom_path = os.path.join(WORK, 'test.rom'); open(rom_path, 'wb').write(rom)
+def st_machine():
+    return _Machine(rom_path, nvram_path=os.path.join(WORK, 'st.nvram'), ntsc=True, log=lambda t: None)
+def st_run(mm, n):
+    for i in range(n):
+        mm.set_pointer(i * 5, i * 3, i & 1)
+        mm.run_frame()
+    return (mm.sched.now, mm.cpu.pc, bytes(b''.join(mm.bus.regions['ram5'])), mm.frame.tobytes())
+ma = st_machine(); st_run(ma, 40)
+spath = os.path.join(WORK, 'slot1.state')
+savestate.save(ma, spath)
+ptr = (ma.slave.input_x, ma.slave.input_y, ma.slave.input_buttons)
+want = st_run(ma, 25)
+mb = st_machine(); st_run(mb, 3)
+mb.set_pointer(*ptr)
+savestate.load(mb, spath)
+got = st_run(mb, 25)
+check('save state: a new machine continues exactly as the saved one', got == want and got[0] > 0,
+      f'cycles {got[0]} vs {want[0]}')
+ma.set_pointer(*ptr)
+savestate.load(ma, spath)
+check('save state: loading into the running machine goes back exactly', st_run(ma, 25) == want)
+meta, thumb = savestate.read_meta(spath)
+check('save state: meta and picture can be read', meta['disc_id'] == 'nodisc' and thumb is not None
+      and len(thumb[2]) == thumb[0] * thumb[1] * 3, str(meta.get('thumb')))
+# 18. refused states leave the running game alone
+def refused(path, expect):
+    mc = st_machine(); st_run(mc, 10)
+    snap = savestate.capture(mc)
+    try:
+        savestate.load(mc, path)
+        return False, 'loaded'
+    except savestate.StateError as e:
+        same = savestate.capture(mc)
+        return expect in str(e) and same[0] == snap[0] and same[1] == snap[1], str(e)
+import json as _json, zlib as _zlib, struct as _struct
+data = open(spath, 'rb').read()
+_, _, o = savestate._read_head(data, spath)
+body = _zlib.decompress(data[o:])
+n = _struct.unpack_from('>I', body)[0]
+stj = _json.loads(body[4:4 + n]); del stj['devices']['cdic']
+head = _json.dumps(stj).encode()
+broken = os.path.join(WORK, 'broken.state')
+open(broken, 'wb').write(data[:o] + _zlib.compress(_struct.pack('>I', len(head)) + head + body[4 + n:]))
+meta_o = dict(meta, rom_crc=1)
+meta_b = _json.dumps(meta_o).encode()
+ml = _struct.unpack_from('>I', data, len(savestate.MAGIC))[0]
+other_bios = (savestate.MAGIC + _struct.pack('>I', len(meta_b)) + meta_b +
+              data[len(savestate.MAGIC) + 4 + ml:])
+for name, content, expect in (('junk.state', b'hello', 'not an OpenCDi state file'),
+                              ('cut.state', data[:len(data) - 50], 'damaged'),
+                              ('broken.state', None, 'damaged'),
+                              ('otherbios.state', other_bios, 'another BIOS')):
+    path = broken if content is None else os.path.join(WORK, name)
+    if content is not None:
+        open(path, 'wb').write(content)
+    good, info = refused(path, expect)
+    check(f'save state: {name} refused, machine unchanged', good, info)
+check('save state: the hotkeys are in the help', 'F5 save state' in __import__('opencdi.frontend').frontend.HELP)
 
 logging.shutdown()
 text = open(logpath).read()

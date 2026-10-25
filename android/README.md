@@ -9,7 +9,7 @@ Copy `opencdi-<version>-arm64-v8a-debug.apk` to the phone and open it (allow
 installing from that source when Android asks), or with USB debugging on:
 
 ```sh
-adb install -r dist/opencdi-0.1.5-arm64-v8a-debug.apk
+adb install -r dist/opencdi-0.1.6-arm64-v8a-debug.apk
 ```
 
 On the first start Android asks for **access to all files** (Android 11 and
@@ -33,9 +33,12 @@ codecs do.
 | Button 2 | the **2** button |
 | Both buttons | hold **1** and **2** together |
 | Launcher menu | **MENU**, or the Android back button |
+| Save / load state | **MENU**, then **Save state** or **Load state** |
 
 In the launcher: tap an item to choose it; in the file browser tap a file twice
-to open it, and drag the list to scroll. Game controllers (Bluetooth or USB) and
+to open it, and drag the list to scroll.  In the save state screen tap a slot to
+see its picture, and tap it again to save or load.  States are kept in the app's
+private folder (`files/.opencdi/states/`), so uninstalling the app deletes them. Game controllers (Bluetooth or USB) and
 keyboards work as on the desktop.
 
 The picture fills the screen height. On phones the buttons sit in the black
