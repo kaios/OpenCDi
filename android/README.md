@@ -9,7 +9,7 @@ Copy `opencdi-<version>-arm64-v8a-debug.apk` to the phone and open it (allow
 installing from that source when Android asks), or with USB debugging on:
 
 ```sh
-adb install -r dist/opencdi-0.1.4-arm64-v8a-debug.apk
+adb install -r dist/opencdi-0.1.5-arm64-v8a-debug.apk
 ```
 
 On the first start Android asks for **access to all files** (Android 11 and
@@ -19,7 +19,10 @@ in `Download/`. Without it, only the app's own folder
 `Android/data/org.opencdi.opencdi/files/` can be read.
 
 No BIOS is included. Copy `cdi220b.rom` (see the main README) to the phone
-and pick it under **BIOS** in the launcher.
+and pick it under **BIOS** in the launcher. Discs can be `.cue`/`.bin` or `.chd`;
+`.chd` takes much less space on the phone. Zstandard-compressed CHDs (`cdzs`)
+do not open in the app (its Python has no zstd module); the default `chdman`
+codecs do.
 
 ## Controls
 

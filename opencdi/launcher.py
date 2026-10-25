@@ -21,7 +21,7 @@ from .machine import check_bios
 BIOS_URL = 'https://archive.org/download/philips-cd-i-misc-bios'
 CONFIG_PATH = Path.home() / '.opencdi' / 'config.json'
 BIOS_EXT = {'.rom', '.bin'}
-DISC_EXT = {'.cue', '.iso', '.bin', '.img'}
+DISC_EXT = {'.cue', '.iso', '.bin', '.img', '.chd'}
 
 BG = (24, 26, 38)
 PANEL = (38, 42, 60)

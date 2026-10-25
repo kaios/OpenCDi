@@ -497,6 +497,108 @@ tc2 = TouchControls(); tc2.layout((768, 480), pygame.Rect(0, 0, 768, 480))
 check('touch: buttons over the picture on a 4:3 screen',
       all(0 <= b.center[0] < 768 and 0 <= b.center[1] < 480 for b in tc2.buttons))
 
+# ----- 0.1.5: CHD disc images ----------------------------------------------------------
+# 15. FLAC (CHD audio hunks): a small encoder here makes fixed-predictor,
+#     rice-coded frames, independent and mid/side; both decoders must return
+#     the samples exactly
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from opencdi import flac as flacmod, chd as chdmod
+class BitW:
+    def __init__(self): self.v, self.n = 0, 0
+    def w(self, x, k): self.v = (self.v << k) | (x & ((1 << k) - 1)); self.n += k
+    def align(self): self.w(0, (-self.n) % 8)
+    def bytes(self): self.align(); return self.v.to_bytes(self.n // 8, 'big')
+def flac_frame(bw, left, right, mid_side):
+    n = len(left)
+    bw.w(0x7ffc, 15); bw.w(0, 1); bw.w(7, 4); bw.w(9, 4); bw.w(10 if mid_side else 1, 4); bw.w(4, 3); bw.w(0, 1)
+    bw.w(0, 8); bw.w(n - 1, 16); bw.w(0, 8)
+    if mid_side:
+        chans = [[(l + r) >> 1 for l, r in zip(left, right)], [l - r for l, r in zip(left, right)]]
+        bps = [16, 17]
+    else:
+        chans, bps = [left, right], [16, 16]
+    for x, b in zip(chans, bps):
+        bw.w(0, 1); bw.w(8 + 2, 6); bw.w(0, 1)                 # fixed predictor, order 2
+        bw.w(x[0], b); bw.w(x[1], b)
+        res = [x[i] - 2 * x[i - 1] + x[i - 2] for i in range(2, n)]
+        u = [(r << 1) ^ (r >> 63) for r in res]
+        k = max(0, (sum(u) // max(len(u), 1)).bit_length() - 1)
+        bw.w(0, 2); bw.w(0, 4); bw.w(k, 4)                     # rice, one partition
+        for v in u:
+            q = v >> k
+            bw.w(0, q); bw.w(1, 1); bw.w(v & ((1 << k) - 1), k)
+    bw.align(); bw.w(0, 16)
+rng = np.random.default_rng(3)
+t = np.arange(1176 * 4)
+L = (np.sin(t * 0.02) * 9000 + rng.normal(0, 200, len(t))).astype(int).tolist()
+R = (np.cos(t * 0.017) * 7000 + rng.normal(0, 300, len(t))).astype(int).tolist()
+bw = BitW()
+for i in range(4):
+    flac_frame(bw, L[i * 1176:(i + 1) * 1176], R[i * 1176:(i + 1) * 1176], mid_side=bool(i & 1))
+stream = bw.bytes() + b'TAIL'
+(pl, pr), used = flacmod.decode_frames(stream, len(L))
+check('FLAC (Python): fixed predictor, rice, mid/side', pl == L and pr == R and used == len(stream) - 4, f'used {used}')
+want = np.empty((len(L), 2), dtype='>i2'); want[:, 0] = L; want[:, 1] = R
+if chdmod._native() is not None:
+    import ctypes
+    out = ctypes.create_string_buffer(len(L) * 4)
+    used_n = chdmod._native().flac_decode_cd(stream, len(stream), out, len(L))
+    check('FLAC (native) gives the same', out.raw == want.tobytes() and used_n == used, f'used {used_n}')
+
+# 16. CHD: written by tools/chd_writer.py (no chdman needed) with compressed,
+#     uncompressed and "copy from self" hunks, ECC stripped from Mode 1 and
+#     Mode 2 form 1 sectors, three tracks (padding between them) and audio
+#     stored big-endian; every sector must read back as in the .bin
+from chd_writer import write_cd_chd
+from opencdi.disc import msf as _msf
+def raw_sector(lba, mode, form2=False):
+    s = bytearray(2352); s[0:12] = chdmod.SYNC; s[12:15] = bytes(_msf(lba)); s[15] = mode
+    if mode == 1:
+        s[16:2068] = rng.integers(0, 256, 2052, dtype=np.uint8).tobytes()
+    else:
+        s[16:24] = bytes([1, 0, 0x20 if form2 else 0x08, 0]) * 2
+        s[24:2352 if form2 else 2076] = rng.integers(0, 256, 2328 if form2 else 2052, dtype=np.uint8).tobytes()
+    if not form2:
+        chdmod.ecc_generate(s)
+    return bytes(s)
+m1 = [raw_sector(i, 1) for i in range(37)]
+au = [rng.integers(0, 256, 2352, dtype=np.uint8).tobytes() for _ in range(16)] * 2 + [bytes(2352)] * 5
+m2 = [raw_sector(37 + len(au) + i, 2, form2=i % 3 == 2) for i in range(29)]
+want_s = m1 + au + m2
+regen = [0]
+_orig_ecc = chdmod.ecc_generate
+def _count_ecc(sec):
+    regen[0] += 1
+    _orig_ecc(sec)
+codecs = ['cdzl'] + (['cdlz'] if chdmod.lzma is not None or chdmod._native() is not None else [])
+if chdmod._zstd() is not None:
+    codecs.append('cdzs')
+for codec in codecs:
+    p = os.path.join(WORK, f'test_{codec}.chd')
+    write_cd_chd(p, [('MODE1_RAW', m1), ('AUDIO', au), ('MODE2_RAW', m2)], codec, store={2})
+    chdmod.ecc_generate = _count_ecc
+    regen[0] = 0
+    dd = Disc(p)
+    got = [dd.read_raw(i) for i in range(len(want_s))]
+    chdmod.ecc_generate = _orig_ecc
+    kinds = sorted({e[0] for e in dd.chd.map})
+    check(f'CHD {codec}: every sector as in the .bin', got == want_s
+          and [(t.kind, t.start, t.length) for t in dd.tracks] == [('mode1', 0, 37), ('audio', 37, 37), ('mode2', 74, 29)]
+          and kinds == [0, 4, 5] and regen[0] == 37 + 20 - 8,      # hunk 2 (8 Mode 1 sectors) is stored as is
+          f'hunk types {kinds}, ECC rebuilt {regen[0]}')
+    dd.close()
+if 'cdzs' not in codecs:
+    print('SKIP CHD cdzs (no zstd module on this Python)')
+for name, content, expect in (('v4.chd', b'MComprHD' + (124).to_bytes(4, 'big') + (4).to_bytes(4, 'big') + bytes(112),
+                               'version 4 is not supported'),
+                              ('junk.chd', b'hello', 'not a CHD file')):
+    p = os.path.join(WORK, name); open(p, 'wb').write(content)
+    try:
+        Disc(p)
+        check(f'CHD error message ({name})', False)
+    except ValueError as e:
+        check(f'CHD error message ({name})', expect in str(e), str(e))
+
 logging.shutdown()
 text = open(logpath).read()
 for key in ('timer0 reload', 'input buffer overflow', 'DMA buffer->memory', 'byte swapped raw image'):

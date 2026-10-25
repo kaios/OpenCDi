@@ -61,7 +61,7 @@ def start_serial_reader():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='opencdi', description='Philips CD-i (Mono-I) emulator')
-    ap.add_argument('disc', nargs='?', help='disc image (.cue/.bin or .iso)')
+    ap.add_argument('disc', nargs='?', help='disc image (.cue/.bin, .chd or .iso)')
     ap.add_argument('--bios', help='CD-i system ROM; when given, starts immediately instead of showing the launcher')
     region = ap.add_mutually_exclusive_group()
     region.add_argument('--ntsc', action='store_true', help='NTSC player, 60 Hz video (the default)')

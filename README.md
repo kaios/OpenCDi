@@ -35,6 +35,9 @@ It emulates the CD-i **Mono-I** board (Philips CD-i 220 F2 / Magnavox CD-i 200):
   the native library is loaded.  Video lines run on a fixed 960-cycle timeline.
 * **Devices** (`cdic.py`, `slave.py`, `scc68070.py`, `nvram.py`) are Python, driven by a
   cycle-based scheduler (`sched.py`).
+* **Disc images** (`disc.py`): `.cue`/`.bin` and `.iso` directly; MAME `.chd` through `chd.py`,
+  with FLAC and LZMA decoders in C (`native/flac.c`, `native/lzma.c`) and Python fallbacks
+  (`flac.py`, Python's `lzma`).
 * **Frontend** (`frontend.py`, `launcher.py`, `inputs.py`): pygame window, launcher, input
   and the audio stream (a ~150 ms buffer with seamless resampling, `audio.py`).  On Android
   `touch.py` adds the touch controls and `android_support.py` the storage access.
@@ -95,7 +98,7 @@ This opens the launcher:
 * **BIOS** opens a file browser to pick the CD-i system ROM you downloaded
   (`cdi220b.rom` or `cdi200.rom`).  The file is checked straight away and the
   launcher tells you whether it will work.  No BIOS ships with the emulator.
-* **Disc** picks a `.cue`, `.iso`, `.bin` or `.img` image (optional; without a disc the
+* **Disc** picks a `.cue`, `.chd`, `.iso`, `.bin` or `.img` image (optional; without a disc the
   CD-i player menu starts).  **Eject disc** removes it.
 * **Video** switches between an NTSC (60 Hz, the default) and a PAL (50 Hz) player.
 * **Start** boots the machine.
@@ -123,7 +126,9 @@ logged there; `--debug` adds per-event detail. What each message means, and ever
 made in each release, is described in `docs/debug/`.
 
 Disc images: `.cue/.bin` (MODE1/2048, MODE1/2352, MODE2/2352, MODE2/2336, CDI/2352, CDI/2336, AUDIO; multi-track and
-multi-file), `.iso`/`.bin`/`.img` single files.  Raw 2352-byte sectors are best because they
+multi-file), MAME `.chd` (version 5, as made by `chdman createcd`: LZMA, Deflate and FLAC
+hunks, and Zstandard when a zstd module is installed; no parent CHDs), `.iso`/`.bin`/`.img`
+single files.  Raw 2352-byte sectors are best because they
 keep the CD-i subheaders; 2048-byte "cooked" ISOs get a synthesized data subheader, which is
 enough for the file system but loses audio/video interleaving information.
 

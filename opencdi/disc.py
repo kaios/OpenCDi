@@ -1,4 +1,4 @@
-"""CD image access: .cue/.bin sheets and .iso files.
+"""CD image access: .cue/.bin sheets, .iso files and MAME .chd images.
 
 Every read returns a full 2352-byte raw sector.  Images that store less than
 that (2048-byte "cooked" ISO, 2336-byte Mode 2 or 2324-byte form 2) get their
@@ -39,6 +39,8 @@ class Track:
         self.start = start          # LBA of index 01
         self.length = length        # sectors
         self.pregap = pregap
+        self.chd = None             # a chd.ChdFile: offset is then the track's first CHD frame
+        self.stored_pregap = 0      # CHD: pregap frames before INDEX 01 that the image holds
         self._fh = None
 
     def fh(self):
@@ -55,8 +57,11 @@ class Disc:
     def __init__(self, path):
         self.path = Path(path)
         ext = self.path.suffix.lower()
+        self.chd = None
         if ext == '.cue':
             self.tracks = self._parse_cue(self.path)
+        elif ext == '.chd':
+            self.tracks = self._chd_tracks(self.path)
         elif ext in ('.iso', '.bin', '.img', '.cdi', '.raw'):
             self.tracks = [self._single_file_track(self.path)]
         else:
@@ -74,7 +79,7 @@ class Disc:
         """A raw data track whose first sector has a byte swapped sync pattern
         means the whole image was dumped byte swapped (audio tracks included)."""
         for t in self.tracks:
-            if t.kind == 'audio' or t.sector_size != RAW:
+            if t.kind == 'audio' or t.sector_size != RAW or t.chd is not None:
                 continue
             try:
                 with open(t.path, 'rb') as f:
@@ -130,6 +135,24 @@ class Disc:
                 dlog.info('%s: "%s" not found; using %s (named like the cue sheet)', cue, name, cand.name)
                 return cand
         raise ValueError(f'"{name}" (named in the cue sheet) not found next to {cue.name}')
+
+    def _chd_tracks(self, path):
+        from .chd import ChdFile
+        self.chd = chd = ChdFile(path)
+        tracks = []
+        lba = 0
+        for ct in chd.tracks:
+            # the pregap comes before INDEX 01; only some CHDs store its frames
+            skip = ct.pregap if ct.pregap_stored else 0
+            start = lba + ct.pregap
+            length = ct.frames - skip
+            t = Track(ct.number, ct.kind, path, ct.chd_frame + skip, ct.datasize, start, length, ct.pregap)
+            t.chd = chd
+            t.stored_pregap = skip
+            tracks.append(t)
+            dlog.debug('%s: track %d is %s, %d frames from LBA %d', path, ct.number, ct.ttype, length, start)
+            lba = start + length + ct.postgap
+        return tracks
 
     def _parse_cue(self, cue):
         text = cue.read_text(errors='replace')
@@ -214,13 +237,28 @@ class Disc:
         """Return 2352 bytes for the sector at lba (0 = 00:02:00)."""
         t = self.track_for(lba)
         rel = lba - t.start
-        if rel < 0 or rel >= t.length:
+        if rel >= t.length and self.chd is not None:
+            # in the next track's pregap, which a CHD may hold (a .cue reads it
+            # from the file as part of the track before)
+            for nt in self.tracks:
+                if nt.stored_pregap and nt.start - nt.stored_pregap <= lba < nt.start:
+                    t, rel = nt, lba - nt.start
+                    break
+        if rel < -t.stored_pregap or rel >= t.length:
             return self._blank(lba, t)
-        f = t.fh()
-        f.seek(t.offset + rel * t.sector_size)
-        data = f.read(t.sector_size)
-        if len(data) < t.sector_size:
-            data = data.ljust(t.sector_size, b'\x00')
+        if t.chd is not None:
+            data = t.chd.frame(t.offset + rel)[:t.sector_size]
+            if t.kind == 'audio':
+                # CHD keeps CD audio big-endian; .bin images are little-endian
+                b = bytearray(data)
+                b[0::2], b[1::2] = data[1::2], data[0::2]
+                data = bytes(b)
+        else:
+            f = t.fh()
+            f.seek(t.offset + rel * t.sector_size)
+            data = f.read(t.sector_size)
+            if len(data) < t.sector_size:
+                data = data.ljust(t.sector_size, b'\x00')
         ss = t.sector_size
         if ss == RAW:
             if self.byteswapped:
@@ -252,6 +290,8 @@ class Disc:
         return SYNC + bytes([m, s, fr, 2]) + bytes([0, 0, 0x20, 0]) * 2 + bytes(RAW - 24)
 
     def close(self):
+        if self.chd is not None:
+            self.chd.close()
         for t in self.tracks:
             if t._fh:
                 t._fh.close()

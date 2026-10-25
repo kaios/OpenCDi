@@ -41,6 +41,9 @@ dlog = debuglog.get('cpu')
 HERE = Path(__file__).with_name('native')
 CORE_C = HERE / 'core.c'
 VIDEO_C = HERE / 'video.c'      # picture helpers used by mcd212.py
+FLAC_C = HERE / 'flac.c'        # FLAC decoder for CHD audio hunks (chd.py)
+LZMA_C = HERE / 'lzma.c'        # LZMA decoder for CHD hunks (the Android Python has no lzma module)
+NATIVE_C = (CORE_C, VIDEO_C, FLAC_C, LZMA_C)
 
 # struct fields shared with C (all int64), in order
 FIELDS = ('ccr', 'srh', 'usp', 'ssp', 'PC', 'vbr', 'xc', 'ipl', 'nmi_edge', 'stopped', 'halted',
@@ -351,24 +354,23 @@ def sources():
     tables = (template count, template id per opcode, flat args, cycles)."""
     templates, tid, args, cycles = opcode_tables()
     ops_c = generate_c(templates)
-    core = CORE_C.read_text()
-    video = VIDEO_C.read_text()
-    digest = hashlib.sha256((core + video + ops_c).encode()).hexdigest()[:16]
-    files = {'core.c': core, 'video.c': video, 'ops.inc': ops_c}
+    files = {f.name: f.read_text() for f in NATIVE_C}
+    digest = hashlib.sha256((''.join(files.values()) + ops_c).encode()).hexdigest()[:16]
+    files['ops.inc'] = ops_c
     return f'_m68k_{digest}.so', files, (len(templates), tid, [v for a in args for v in a], cycles)
 
 
 def compile_command(out, src_dir, cc=None):
     cc = cc or os.environ.get('CC', 'cc')
-    return [cc, '-O2', '-fwrapv', '-fno-strict-aliasing', '-shared', '-fPIC', '-o', str(out),
-            str(Path(src_dir) / 'core.c'), str(Path(src_dir) / 'video.c')]
+    return [cc, '-O2', '-fwrapv', '-fno-strict-aliasing', '-shared', '-fPIC', '-o', str(out)] + \
+        [str(Path(src_dir) / f.name) for f in NATIVE_C]
 
 
 def inputs_digest():
     """Hash of every file the native build is made from (see prebuilt.json)."""
     h = hashlib.sha256()
-    for f in (Path(m68k.__file__), Path(__file__), CORE_C, VIDEO_C,
-              Path(m68k.__file__).with_name('data') / 'cycles070.bin'):
+    for f in (Path(m68k.__file__), Path(__file__)) + NATIVE_C + (
+              Path(m68k.__file__).with_name('data') / 'cycles070.bin',):
         h.update(f.read_bytes())
     return h.hexdigest()
 
@@ -472,6 +474,10 @@ def load():
         vp, ci, i64 = ctypes.c_void_p, ctypes.c_int, ctypes.c_int64
         lib.vid_dyuv.restype = None
         lib.vid_dyuv.argtypes = [vp, vp, ci, ci, i64, vp, vp, vp, vp, vp, vp, ctypes.c_uint32, vp]
+        lib.flac_decode_cd.restype = ctypes.c_long
+        lib.flac_decode_cd.argtypes = [ctypes.c_char_p, ctypes.c_long, vp, ci]
+        lib.lzma_decode_raw.restype = ctypes.c_long
+        lib.lzma_decode_raw.argtypes = [ctypes.c_char_p, ctypes.c_long, vp, ctypes.c_long]
         lib.vid_mix.restype = None
         lib.vid_mix.argtypes = [vp, vp, vp, vp, ci, ci, vp, vp, ci, ci, ctypes.c_uint32, vp, vp, ci,
                                 ctypes.c_uint32, vp]

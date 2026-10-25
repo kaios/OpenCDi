@@ -41,7 +41,7 @@ GEN=$(mktemp -d)
 trap 'rm -rf "$GEN"' EXIT
 SO=$(cd "$ROOT" && python3 -m opencdi.m68k_native --sources "$GEN")
 echo "compiling $SO for arm64-v8a"
-"$CC" -O2 -fwrapv -fno-strict-aliasing -shared -fPIC -o "$NAT/$SO" "$GEN/core.c" "$GEN/video.c"
+"$CC" -O2 -fwrapv -fno-strict-aliasing -shared -fPIC -o "$NAT/$SO" "$GEN"/*.c
 (cd "$SRC" && python3 -m opencdi.m68k_native --record "$NAT" >/dev/null)
 find "$SRC" -name __pycache__ -prune -exec rm -rf {} +
 
