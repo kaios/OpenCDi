@@ -11,6 +11,7 @@ motion to one shared pointer:
 * keyboard: arrows or WASD to move, Z/Space/J = button 1, X/K = button 2,
   C/L = both, Shift = fast
 * mouse: click into the window to capture it, F10 releases it
+* touch screen (Android): see touch.py
 """
 
 import math
@@ -92,7 +93,12 @@ class Pad:
 
 
 class InputManager:
-    def __init__(self):
+    def __init__(self, touch=False):
+        if touch:
+            from .touch import TouchControls
+            self.touch = TouchControls()
+        else:
+            self.touch = None
         self.x = 0
         self.y = 0
         self.buttons = 0
@@ -132,6 +138,11 @@ class InputManager:
         if t in (pygame.JOYDEVICEADDED, pygame.JOYDEVICEREMOVED):
             self.rescan()
             return True
+        if self.touch is not None:
+            if self.touch.handle_event(ev):
+                return True
+            if t in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION) and getattr(ev, 'touch', False):
+                return True   # SDL's mouse copy of a touch: the touch controls have it
         if t == pygame.MOUSEBUTTONDOWN:
             if ev.button > 3:
                 return True   # wheel
@@ -234,10 +245,13 @@ class InputManager:
         ix, iy = int(self.frac_x), int(self.frac_y)
         self.frac_x -= ix
         self.frac_y -= iy
-        self.x += ix + self.mouse_dx
-        self.y += iy + self.mouse_dy
+        tx = ty = tb = 0
+        if self.touch is not None:
+            tx, ty, tb = self.touch.take()
+        self.x += ix + self.mouse_dx + tx
+        self.y += iy + self.mouse_dy + ty
         self.mouse_dx = self.mouse_dy = 0
-        buttons = (1 if b1 else 0) | (2 if b2 else 0) | self.mouse_buttons
+        buttons = (1 if b1 else 0) | (2 if b2 else 0) | self.mouse_buttons | tb
         if buttons & 3 == 3:
             buttons |= 4
         self.buttons = buttons

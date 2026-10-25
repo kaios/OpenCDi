@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pygame
 
-from . import debuglog
+from . import android_support, debuglog
 from .audio import OUT_RATE, LinearResampler
 from .inputs import InputManager
 
@@ -25,6 +25,7 @@ HELP = """OpenCDi controls
   P pause   Tab (hold) fast forward"""
 
 BASE_SIZE = (768, 560)
+ANDROID_HEIGHT = 480    # logical window height on Android (an NTSC picture)
 
 
 def frame_to_surface(frame, surf=None):
@@ -205,20 +206,35 @@ class App:
 
     def __init__(self, scale=1.0, fullscreen=False, audio=True):
         pygame.init()
+        self.android = android_support.is_android()
         self.scale = scale
-        self.fullscreen = fullscreen
+        self.fullscreen = fullscreen or self.android
         self.window = None
         self.content_size = BASE_SIZE   # what is shown: the launcher canvas or the CD-i picture
         self.user_sized = False         # the user resized the window: keep their size
+        if self.android:
+            info = pygame.display.Info()
+            w, h = info.current_w or 1920, info.current_h or 1080
+            self.screen_aspect = max(w, h) / min(w, h)     # the app runs in landscape
+            dlog.info('android screen %dx%d', w, h)
         self.open_window()
         self.audio = Audio() if audio else None
-        self.input = InputManager()
+        self.input = InputManager(touch=self.android)
         print(self.input.describe())
 
     def window_size(self):
+        if self.android:
+            # one logical size (pygame.SCALED) for the whole run: as tall as an
+            # NTSC picture and as wide as the screen's shape, so the GPU scales it
+            # to the whole screen and the side margins hold the touch buttons
+            # (SDL cannot change a SCALED window's size reliably)
+            return (max(768, round(ANDROID_HEIGHT * self.screen_aspect)), ANDROID_HEIGHT)
         return (int(self.content_size[0] * self.scale), int(self.content_size[1] * self.scale))
 
     def open_window(self):
+        if self.android:
+            self.window = pygame.display.set_mode(self.window_size(), pygame.FULLSCREEN | pygame.SCALED)
+            return
         if self.fullscreen:
             self.window = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         else:
@@ -247,6 +263,8 @@ class App:
             self.user_sized = True
 
     def toggle_fullscreen(self):
+        if self.android:
+            return
         self.fullscreen = not self.fullscreen
         self.open_window()
 
@@ -306,7 +324,20 @@ class Emulator:
         self.app.set_content_size((w, h))
         window = self.app.window
         ww, wh = window.get_size()
-        if (ww, wh) == (w, h) and window.get_bitsize() == 32 and window.get_masks()[:3] == (0xff0000, 0xff00, 0xff):
+        touch = self.app.input.touch
+        if touch is not None:
+            # Android: the picture unscaled in the middle (the GPU scales the
+            # whole window), touch buttons in the margins
+            self.surf = frame_to_surface(frame, self.surf)
+            img = self.surf
+            if h > wh:                       # PAL: 560 lines into the 480-line window
+                img = pygame.transform.smoothscale(img, (w * wh // h, wh))
+            rect = img.get_rect(center=(ww // 2, wh // 2))
+            window.fill((0, 0, 0))
+            window.blit(img, rect)
+            touch.layout((ww, wh), rect)
+            touch.draw(window)
+        elif (ww, wh) == (w, h) and window.get_bitsize() == 32 and window.get_masks()[:3] == (0xff0000, 0xff00, 0xff):
             pygame.surfarray.blit_array(window, frame.T)     # straight into the window, no copies
         else:
             self.surf = frame_to_surface(frame, self.surf)
@@ -450,7 +481,9 @@ class Emulator:
                         continue
                     if ev.type == pygame.KEYDOWN:
                         k = ev.key
-                        if k in (pygame.K_ESCAPE, pygame.K_F2):
+                        if k == getattr(pygame, 'K_AC_BACK', None):
+                            result = 'menu'          # Android back button
+                        elif k in (pygame.K_ESCAPE, pygame.K_F2):
                             if inp.mouse_captured and k == pygame.K_ESCAPE:
                                 with self.input_lock:
                                     inp.capture_mouse(False)
@@ -471,6 +504,12 @@ class Emulator:
                 if menu_btn and not menu_held:
                     result = 'menu'
                 menu_held = menu_btn
+                if inp.touch is not None:
+                    with self.input_lock:
+                        if inp.touch.take_menu():
+                            result = 'menu'
+                        if inp.touch.changed:
+                            redraw = True        # a touch button was pressed or released
                 if result is not None:
                     break
                 with self._cond:

@@ -36,7 +36,8 @@ It emulates the CD-i **Mono-I** board (Philips CD-i 220 F2 / Magnavox CD-i 200):
 * **Devices** (`cdic.py`, `slave.py`, `scc68070.py`, `nvram.py`) are Python, driven by a
   cycle-based scheduler (`sched.py`).
 * **Frontend** (`frontend.py`, `launcher.py`, `inputs.py`): pygame window, launcher, input
-  and the audio stream (a ~150 ms buffer with seamless resampling, `audio.py`).
+  and the audio stream (a ~150 ms buffer with seamless resampling, `audio.py`).  On Android
+  `touch.py` adds the touch controls and `android_support.py` the storage access.
 
 ## Requirements
 
@@ -74,6 +75,14 @@ CPU core.  Building it needs `gcc`.  To install on another architecture, run
 This installs the `opencdi` command and an "OpenCDi" entry in the desktop's Games menu.
 The package does not contain a BIOS; pick one in the launcher on first start.
 Remove it with `sudo apt remove opencdi`.
+
+## Android
+
+An Android 10+ app for 64-bit ARM phones and tablets is built with `tools/build_apk.sh`
+(`dist/opencdi-<version>-arm64-v8a-debug.apk`).  It runs the same code with touch controls
+(drag to move the pointer, tap to click, on-screen 1 / 2 / MENU buttons) and the native
+CPU core compiled for ARM.  See [android/README.md](android/README.md) for installing,
+controls and building.
 
 ## Running
 

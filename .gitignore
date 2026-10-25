@@ -9,3 +9,9 @@ build/
 *.dpkg
 # native CPU core built on first run (opencdi/m68k_native.py)
 opencdi/native/_m68k_*.so
+# Android build (tools/build_apk.sh)
+android/.buildozer/
+android/build/
+android/bin/
+opencdi/native/_m68k_*.tables
+opencdi/native/prebuilt.json

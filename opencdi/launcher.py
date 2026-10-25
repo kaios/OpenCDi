@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pygame
 
+from . import android_support
 from .frontend import BASE_SIZE
 from .machine import check_bios
 
@@ -90,6 +91,7 @@ class NavInput:
             pygame.K_ESCAPE: 'back', pygame.K_BACKSPACE: 'up_dir',
             pygame.K_PAGEUP: 'pgup', pygame.K_PAGEDOWN: 'pgdn', pygame.K_HOME: 'home', pygame.K_END: 'end',
             pygame.K_TAB: 'toggle', pygame.K_F11: 'fullscreen',
+            getattr(pygame, 'K_AC_BACK', -1): 'back',      # Android back button
         }.get(ev.key)
 
 
@@ -146,11 +148,13 @@ class FileBrowser:
         self.ext = extensions
         self.describe = describe
         self.show_all = False
-        self.cwd = Path(start_dir) if start_dir and Path(start_dir).is_dir() else Path.home()
+        default = android_support.browse_start() or Path.home()
+        self.cwd = Path(start_dir) if start_dir and Path(start_dir).is_dir() else default
         self.sel = 0
         self.top = 0
         self.rows = 15
         self.last_click = (0, -1)
+        self.drag = 0.0             # touch scrolling, in canvas pixels not yet scrolled
         self.info_cache = {}
         self.load()
 
@@ -254,6 +258,12 @@ class FileBrowser:
                         self.load()
                 elif ev.type == pygame.MOUSEWHEEL:
                     self.top = max(0, min(max(0, len(self.entries) - self.rows), self.top - ev.y * 3))
+                elif ev.type == pygame.MOUSEMOTION and getattr(ev, 'touch', False) and ev.buttons[0]:
+                    # touch: drag the list to scroll it
+                    self.drag += ev.rel[1] / max(self.screen.k, 0.01)
+                    rows = int(self.drag / 26)
+                    self.drag -= rows * 26
+                    self.top = max(0, min(max(0, len(self.entries) - self.rows), self.top - rows))
                 elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                     x, y = self.screen.to_canvas(ev.pos)
                     if 20 <= x <= 748 and 82 <= y < 82 + self.rows * 26:
@@ -261,6 +271,8 @@ class FileBrowser:
                         if i < len(self.entries):
                             now = time.monotonic()
                             double = self.last_click[1] == i and now - self.last_click[0] < 0.4
+                            if getattr(ev, 'touch', False) and self.sel == i:
+                                double = True      # touch: tapping the selected entry opens it
                             self.sel = i
                             self.last_click = (now, i)
                             if double:

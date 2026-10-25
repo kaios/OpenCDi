@@ -420,6 +420,7 @@ pygame.display.init()
 from opencdi.frontend import Emulator
 class FakeInput:
     mouse_captured = False
+    touch = None
     def update(self): return 0, 0, 0
     def pad_state(self): return 0, 0, False, False, False
     def handle_event(self, ev): return False
@@ -462,6 +463,39 @@ except RuntimeError as e:
     check('emulation thread error reaches the main thread', str(e) == 'boom')
 check('emulation thread stopped, switch interval restored',
       not any(t.name == 'emulation' for t in threading.enumerate()) and sys.getswitchinterval() == switch)
+
+# ----- 0.1.4: Android touch controls ------------------------------------------------
+# 14. drag moves the pointer, a tap clicks button 1, the buttons hold, MENU is
+#     taken once; on a squarer screen the buttons go over the picture
+import time as _time
+from opencdi.touch import TouchControls, CLICK_FRAMES, TAP_TIME
+tc = TouchControls()
+LW, LH = 1067, 480                             # a 20:9 phone at 480 logical lines
+tc.layout((LW, LH), pygame.Rect(149, 0, 768, 480))
+def fe(kind, x, y, fid, dx=0, dy=0):
+    return pygame.event.Event(kind, x=x / LW, y=y / LH, dx=dx / LW, dy=dy / LH, finger_id=fid, touch_id=0, pressure=1)
+tc.handle_event(fe(pygame.FINGERDOWN, 400, 200, 1))
+for i in range(10):
+    tc.handle_event(fe(pygame.FINGERMOTION, 400, 200, 1, dx=10, dy=-4))
+_time.sleep(TAP_TIME + 0.05)
+tc.handle_event(fe(pygame.FINGERUP, 500, 160, 1))
+d = tc.take()
+check('touch: drag moves the pointer, no click', d == (100, -40, 0), str(d))
+tc.handle_event(fe(pygame.FINGERDOWN, 300, 300, 2)); tc.handle_event(fe(pygame.FINGERUP, 300, 300, 2))
+taps = [tc.take()[2] for _ in range(CLICK_FRAMES + 2)]
+check('touch: a tap is a short button 1 click', taps == [1] * CLICK_FRAMES + [0, 0], str(taps))
+bt = {b.name: b for b in tc.buttons}
+check('touch: buttons beside the picture on a phone', all(b.center[0] - b.radius >= 917 for k, b in bt.items() if k != 'menu')
+      and bt['menu'].center[0] + bt['menu'].radius <= 149, str({k: (b.center, b.radius) for k, b in bt.items()}))
+tc.handle_event(fe(pygame.FINGERDOWN, *bt['b2'].center, 3)); s2 = tc.take()[2]
+tc.handle_event(fe(pygame.FINGERDOWN, *bt['b1'].center, 4)); s12 = tc.take()[2]
+tc.handle_event(fe(pygame.FINGERUP, *bt['b1'].center, 4)); tc.handle_event(fe(pygame.FINGERUP, *bt['b2'].center, 3))
+check('touch: hold 2, then 1 and 2, then nothing', (s2, s12, tc.take()[2]) == (2, 3, 0), f'{s2} {s12}')
+tc.handle_event(fe(pygame.FINGERDOWN, *bt['menu'].center, 5))
+check('touch: MENU is taken once', (tc.take_menu(), tc.take_menu()) == (True, False))
+tc2 = TouchControls(); tc2.layout((768, 480), pygame.Rect(0, 0, 768, 480))
+check('touch: buttons over the picture on a 4:3 screen',
+      all(0 <= b.center[0] < 768 and 0 <= b.center[1] < 480 for b in tc2.buttons))
 
 logging.shutdown()
 text = open(logpath).read()

@@ -23,11 +23,13 @@ reached through callbacks into Python.
 import ast
 import ctypes
 import hashlib
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import zlib
+from array import array
 from pathlib import Path
 
 from . import debuglog
@@ -344,45 +346,108 @@ def cache_dirs():
     yield Path(base) / 'opencdi'
 
 
-def build(dest_dir=None, quiet=False):
-    """Generate and compile the library; returns its path."""
+def sources():
+    """Everything a build needs: (library name, {file: text}, tables).
+    tables = (template count, template id per opcode, flat args, cycles)."""
     templates, tid, args, cycles = opcode_tables()
     ops_c = generate_c(templates)
     core = CORE_C.read_text()
     video = VIDEO_C.read_text()
     digest = hashlib.sha256((core + video + ops_c).encode()).hexdigest()[:16]
-    name = f'_m68k_{digest}.so'
+    files = {'core.c': core, 'video.c': video, 'ops.inc': ops_c}
+    return f'_m68k_{digest}.so', files, (len(templates), tid, [v for a in args for v in a], cycles)
+
+
+def compile_command(out, src_dir, cc=None):
+    cc = cc or os.environ.get('CC', 'cc')
+    return [cc, '-O2', '-fwrapv', '-fno-strict-aliasing', '-shared', '-fPIC', '-o', str(out),
+            str(Path(src_dir) / 'core.c'), str(Path(src_dir) / 'video.c')]
+
+
+def inputs_digest():
+    """Hash of every file the native build is made from (see prebuilt.json)."""
+    h = hashlib.sha256()
+    for f in (Path(m68k.__file__), Path(__file__), CORE_C, VIDEO_C,
+              Path(m68k.__file__).with_name('data') / 'cycles070.bin'):
+        h.update(f.read_bytes())
+    return h.hexdigest()
+
+
+def write_prebuilt(dest_dir, so_name, tables):
+    """Record a finished build in dest_dir/prebuilt.json, with the opcode
+    tables, so later starts skip generating 65,536 handlers (seconds on a phone)."""
+    n, tid, args, cycles = tables
+    blob = (array('H', tid).tobytes() + array('q', args).tobytes() + array('i', cycles).tobytes())
+    stem = so_name[:-3]
+    (Path(dest_dir) / f'{stem}.tables').write_bytes(zlib.compress(blob, 9))
+    (Path(dest_dir) / 'prebuilt.json').write_text(json.dumps(
+        {'so': so_name, 'tables': f'{stem}.tables', 'templates': n, 'inputs': inputs_digest()}))
+
+
+def _prebuilt():
+    """(path, tables) of a recorded build that matches the current sources, or None."""
+    try:
+        current = inputs_digest()
+    except OSError:
+        # sources not readable (an app packaged without .py files): only the
+        # Android build, whose library always comes with the app, is trusted then
+        current = None
+    for d in cache_dirs():
+        try:
+            info = json.loads((d / 'prebuilt.json').read_text())
+            if not (d / info['so']).exists():
+                continue
+            if info['inputs'] != current and not (current is None and os.environ.get('OPENCDI_ANDROID') == '1'):
+                continue
+            blob = zlib.decompress((d / info['tables']).read_bytes())
+            tid = array('H'); tid.frombytes(blob[:2 * 65536])
+            args = array('q'); args.frombytes(blob[2 * 65536:2 * 65536 + 32 * 65536])
+            cycles = array('i'); cycles.frombytes(blob[34 * 65536:])
+            if len(cycles) != 65536:
+                continue
+            return d / info['so'], (info['templates'], tid, args, cycles)
+        except (OSError, ValueError, KeyError, zlib.error):
+            continue
+    return None
+
+
+def build(dest_dir=None, quiet=False):
+    """Generate and compile the library; returns (path, tables)."""
+    if dest_dir is None:
+        hit = _prebuilt()
+        if hit is not None:
+            return hit
+    name, files, tables = sources()
     dirs = [Path(dest_dir)] if dest_dir else list(cache_dirs())
     for d in dirs:
         if (d / name).exists():
-            return d / name, (templates, tid, args, cycles)
+            return d / name, tables
     last = None
     for d in dirs:
         try:
             d.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=d) as tmp:
-                (Path(tmp) / 'ops.inc').write_text(ops_c)
-                src = Path(tmp) / 'core.c'
-                src.write_text(core)
-                vsrc = Path(tmp) / 'video.c'
-                vsrc.write_text(video)
+                for fn, text in files.items():
+                    (Path(tmp) / fn).write_text(text)
                 out = Path(tmp) / name
-                cc = os.environ.get('CC', 'cc')
-                cmd = [cc, '-O2', '-fwrapv', '-fno-strict-aliasing', '-shared', '-fPIC', '-o', str(out),
-                       str(src), str(vsrc)]
+                cmd = compile_command(out, tmp)
                 if not quiet:
-                    print(f'building the native CPU core ({len(templates)} templates), this takes a minute...',
+                    print(f'building the native CPU core ({tables[0]} templates), this takes a minute...',
                           flush=True)
                 dlog.info('compiling native CPU core: %s', ' '.join(cmd))
                 subprocess.run(cmd, check=True, capture_output=True, text=True)
                 os.replace(out, d / name)
-            for old in d.glob('_m68k_*.so'):
-                if old.name != name:
+            for old in list(d.glob('_m68k_*.so')) + list(d.glob('_m68k_*.tables')):
+                if old.stem != name[:-3]:
                     try:
                         old.unlink()
                     except OSError:
                         pass
-            return d / name, (templates, tid, args, cycles)
+            try:
+                write_prebuilt(d, name, tables)
+            except OSError:
+                pass
+            return d / name, tables
         except (OSError, subprocess.CalledProcessError) as e:
             last = e
             detail = getattr(e, 'stderr', '') or ''
@@ -410,12 +475,12 @@ def load():
         lib.vid_mix.restype = None
         lib.vid_mix.argtypes = [vp, vp, vp, vp, ci, ci, vp, vp, ci, ci, ctypes.c_uint32, vp, vp, ci,
                                 ctypes.c_uint32, vp]
-        templates, tid, args, cycles = tables
-        if lib.cpu_n_templates() != len(templates):
+        n_templates, tid, args, cycles = tables
+        if lib.cpu_n_templates() != n_templates:
             raise RuntimeError('native core does not match m68k.py')
         n = 65536
         t_arr = (ctypes.c_uint16 * n)(*tid)
-        flat = (ctypes.c_int64 * (4 * n))(*[v for a in args for v in a])
+        flat = (ctypes.c_int64 * (4 * n))(*args)
         c_arr = (ctypes.c_int32 * n)(*cycles)
         cond = (ctypes.c_uint8 * 512)(*[int(b) for t in m68k.COND for b in t])
         if lib.cpu_init_tables(t_arr, flat, c_arr, cond) != 0:
@@ -484,7 +549,7 @@ class NativeM68070:
                    'log_fault': lambda pc, op, exc: None, 'log_trace': lambda pc, op: None}
         self._pending = None
         self.ns = _NS(self)
-        self.templates = len(_tables[0])
+        self.templates = _tables[0]
         # page tables: pointers into the bus's bytearrays (kept alive by the bus)
         self._keep = []
         ptr = {}
@@ -647,6 +712,21 @@ def create_cpu(bus, native=None):
 
 
 if __name__ == '__main__':
-    # python -m opencdi.m68k_native [DIR]: build the library (used by tools/build_deb.sh)
-    p, _ = build(sys.argv[1] if len(sys.argv) > 1 else None)
-    print(p)
+    # python -m opencdi.m68k_native [DIR]        build for this machine (tools/build_deb.sh)
+    # python -m opencdi.m68k_native --sources DIR   write the C sources, print the library name
+    # python -m opencdi.m68k_native --record DIR    record DIR/<library> in DIR/prebuilt.json
+    #                                               (tools/build_apk.sh, after cross-compiling)
+    if len(sys.argv) == 3 and sys.argv[1] == '--sources':
+        so_name, files, _ = sources()
+        for fn, text in files.items():
+            (Path(sys.argv[2]) / fn).write_text(text)
+        print(so_name)
+    elif len(sys.argv) == 3 and sys.argv[1] == '--record':
+        so_name, _, tables = sources()
+        if not (Path(sys.argv[2]) / so_name).exists():
+            sys.exit(f'{sys.argv[2]}/{so_name} not found')
+        write_prebuilt(sys.argv[2], so_name, tables)
+        print(so_name)
+    else:
+        p, _ = build(sys.argv[1] if len(sys.argv) > 1 else None)
+        print(p)
