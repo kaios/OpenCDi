@@ -1,25 +1,54 @@
 # OpenCDi
 
-Stand-alone open source Philips CD-i emulator, written in Python.
+Stand-alone open source Philips CD-i emulator, written in Python with a native (C) CPU core.
 
 It emulates the CD-i **Mono-I** board (Philips CD-i 220 F2 / Magnavox CD-i 200):
 
 | Part | Chip | Module |
 |---|---|---|
-| CPU | Philips SCC68070 (68000 core, 15 MHz) + on-chip timer, UART, interrupt controller, DMA | `m68k.py`, `scc68070.py` |
-| Video | MCD212 VDSC: ICA/DCA display programs, CLUT8/7/4, RL7/RL3 run-length, DYUV, RGB555, mosaic, mattes, transparency, plane mixing, hardware cursor, interlace | `mcd212.py` |
+| CPU | Philips SCC68070 (68000 core, 15 MHz) + on-chip timer, UART, interrupt controller, DMA | `m68k.py`, `m68k_native.py`, `native/core.c`, `scc68070.py` |
+| Video | MCD212 VDSC: ICA/DCA display programs, CLUT8/7/4, RL7/RL3 run-length, DYUV, RGB555, mosaic, mattes, transparency, plane mixing, hardware cursor, interlace | `mcd212.py`, `native/video.c` |
 | CD drive | CDIC: Mode 1/Mode 2 sector reads, TOC, CD-DA playback, CD-ROM XA ADPCM audio (4/8-bit, 37.8/18.9 kHz, mono/stereo) | `cdic.py` |
 | Input/system | SLAVE controller (pointer device, audio attenuation, front panel) | `slave.py` |
 | NVRAM | MK48T08 timekeeper (saved between runs) | `nvram.py` |
+
+## Architecture
+
+```
+ main thread                         emulation thread                 audio-feeder thread
+ -----------                         ----------------                 -------------------
+ window events, launcher             Machine.run_frame() at 60.05 Hz  tops up the sound card
+ newest picture -> window   <------  (NTSC) / 50.08 Hz (PAL), paced   from the audio buffer
+ (unchanged pictures not sent)       to the sound card's clock  ----> every 5 ms
+```
+
+* **CPU** (`m68k.py`): the 68000 instruction set is described once, as Python templates
+  generated per opcode.  `m68k_native.py` translates those templates to C, and
+  `native/core.c` adds the run loop, exceptions and memory access.  The result is compiled
+  into `opencdi/native/_m68k_<hash>.so` and loaded with `ctypes`, which releases the GIL
+  while the CPU runs.  RAM is shared with the Python devices without copying; device
+  registers are reached through callbacks into Python.  If no C compiler is available, or
+  with `OPENCDI_CPU=python`, the same templates run as a Python core.  Both cores give
+  identical results.
+* **Video** (`mcd212.py`): display programs and line timing are Python; pixels are made once
+  per frame with numpy, and DYUV decoding and plane mixing use C (`native/video.c`) when
+  the native library is loaded.  Video lines run on a fixed 960-cycle timeline.
+* **Devices** (`cdic.py`, `slave.py`, `scc68070.py`, `nvram.py`) are Python, driven by a
+  cycle-based scheduler (`sched.py`).
+* **Frontend** (`frontend.py`, `launcher.py`, `inputs.py`): pygame window, launcher, input
+  and the audio stream (a ~150 ms buffer with seamless resampling, `audio.py`).
 
 ## Requirements
 
 * Python 3.9+
 * `pip install -r requirements.txt` (numpy, pygame 2)
-* A C compiler (`gcc`, Debian/Ubuntu package `build-essential`) for the fast native CPU
-  core.  It is compiled once, on first start (about 15 s), and cached.  Without a
-  compiler the emulator uses its Python CPU core, which is several times slower.
-  The `.deb` package contains the compiled core already.
+* A C compiler (`gcc`; on Debian/Ubuntu `sudo apt install build-essential`) when running
+  from source.  The native core is compiled once, on first start (about 15 s), into
+  `opencdi/native/` or, if that is not writable, `~/.cache/opencdi/`, and rebuilt
+  automatically when the CPU code changes.  Without a compiler the emulator uses its
+  Python CPU core, which is several times slower (`debug.log` says which core runs).
+  No Python headers are needed; the library is plain C.  The `.deb` already contains the
+  compiled core, so installing it needs no compiler.
 * **A CD-i system ROM (BIOS) is required.** It is not included with the emulator. Download it from
   <https://archive.org/download/philips-cd-i-misc-bios>, save it anywhere, and select it in the
   launcher (or pass `--bios PATH`).
@@ -37,8 +66,10 @@ tools/build_deb.sh                       # writes dist/opencdi_<version>_<arch>.
 sudo apt install ./dist/opencdi_*.deb
 ```
 
-The package is built for the machine's architecture (for example `amd64`), because it
-contains the compiled CPU core.
+Since 0.1.3 the package is built for the architecture of the machine that builds it
+(`opencdi_0.1.3_amd64.deb` on a PC) instead of `_all`, because it contains the compiled
+CPU core.  Building it needs `gcc`.  To install on another architecture, run
+`tools/build_deb.sh` there.
 
 This installs the `opencdi` command and an "OpenCDi" entry in the desktop's Games menu.
 The package does not contain a BIOS; pick one in the launcher on first start.
@@ -115,19 +146,13 @@ intro and first scenes.  Both CPU cores pass the SingleStepTests 68000 suite
 (`tools/run_sst.py`) apart from address-error cases it skips.
 `tools/check_fixes.py` runs regression checks for the fixes since 0.1.1 without a BIOS.
 
-Speed: the 68000 core is generated per opcode from Python templates and compiled to C
-(`opencdi/m68k_native.py`); DYUV decoding and plane mixing are in C too, and the rest
-is Python plus numpy.  The Python core and the numpy code remain as a fallback
-(`OPENCDI_CPU=python`), and both cores give identical results.  A picture that has not
-changed is reused, and when the host falls behind the picture of a frame is skipped
-(never the emulation) so the sound keeps playing.  The machine runs on its own thread
-while the main thread puts the newest picture in the window, and pictures that did not
-change are not sent at all.  Audio runs through a ~150 ms buffer
-and the emulator syncs to the sound card's clock.  Over SSH X forwarding every window
-pixel crosses the network each frame: keep `--scale 1` and the window small there.  With the native core
-the player shell and *Alice in Wonderland* run at full speed (60 fps) with headroom to
-spare on a 2-core machine.  Only that one commercial title has been tried, so expect bugs
-in others.
+Speed: with the native core, the player shell and *Alice in Wonderland* run at full
+speed (60 fps).  On a 2-core machine, Alice's animated scenes take 6.5-7.4 ms per frame
+headless, against a 16.7 ms budget; the Python core needs about 36 ms.  A picture that
+has not changed is reused, and when the host falls behind, the picture of a frame is
+skipped (never the emulation) so the sound keeps playing.  Over SSH X forwarding every
+window pixel crosses the network each frame: keep `--scale 1` and don't go fullscreen
+there.  Only one commercial title has been tried, so expect bugs in others.
 Digital Video (MPEG) cartridge titles are not supported.
 
 ## Credits
